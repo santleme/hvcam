@@ -39,9 +39,23 @@ static uint64_t g_seq;
 static int g_serve_n = 64; /* extra REQs: same-seq retry loop spends a few */
 
 /* 0 = responde completo; 1 = para no meio do header;
- * 2 = para no meio do payload. Atomico como g_seq. */
+ * 2 = para no meio do payload; 3 = demora alem do deadline.
+ * Atomico como g_seq. */
 static int g_stall;
 #define stall_load() __atomic_load_n(&g_stall, __ATOMIC_ACQUIRE)
+
+/* send que nao dispara SIGPIPE quando o cliente ja fechou —
+ * o servidor de stall escreve DEPOIS do cliente desistir. */
+static void send_noflag(int fd, const void *p, size_t n)
+{
+    (void)send(fd, p, n, MSG_NOSIGNAL);
+}
+
+static void nap_ms(long ms)
+{
+    struct timespec d = {ms / 1000, (ms % 1000) * 1000000};
+    nanosleep(&d, NULL);
+}
 
 static void *server(void *arg)
 {
@@ -72,21 +86,23 @@ static void *server(void *arg)
         fill_fake(payload, s);
         int stall = stall_load();
         if (stall == 1) { /* para no meio do header */
-            send(cfd, &hdr, 10, 0);
-            struct timespec d = {0, 200000000};
-            nanosleep(&d, NULL);
-            send(cfd, (uint8_t *)&hdr + 10, sizeof(hdr) - 10, 0);
-            send(cfd, payload, sizeof(payload), 0);
+            send_noflag(cfd, &hdr, 10);
+            nap_ms(200);
+            send_noflag(cfd, (uint8_t *)&hdr + 10, sizeof(hdr) - 10);
+            send_noflag(cfd, payload, sizeof(payload));
         } else if (stall == 2) { /* para no meio do payload */
-            send(cfd, &hdr, sizeof(hdr), 0);
-            send(cfd, payload, FAKE_BYTES / 2, 0);
-            struct timespec d = {0, 200000000};
-            nanosleep(&d, NULL);
-            send(cfd, payload + FAKE_BYTES / 2,
-                 sizeof(payload) - FAKE_BYTES / 2, 0);
+            send_noflag(cfd, &hdr, sizeof(hdr));
+            send_noflag(cfd, payload, FAKE_BYTES / 2);
+            nap_ms(200);
+            send_noflag(cfd, payload + FAKE_BYTES / 2,
+                        sizeof(payload) - FAKE_BYTES / 2);
+        } else if (stall == 3) { /* responde so depois do deadline */
+            nap_ms(200);
+            send_noflag(cfd, &hdr, sizeof(hdr));
+            send_noflag(cfd, payload, sizeof(payload));
         } else {
-            send(cfd, &hdr, sizeof(hdr), 0);
-            send(cfd, payload, sizeof(payload), 0);
+            send_noflag(cfd, &hdr, sizeof(hdr));
+            send_noflag(cfd, payload, sizeof(payload));
         }
     }
     close(cfd);
@@ -154,10 +170,11 @@ int main(void)
     close(lfd);
     pthread_join(tid, NULL);
 
-    /* Deadline no meio de uma resposta: -1 (terminal), nao -2.
-     * O stream perdeu a posicao — retry exige reconectar.
-     * stall=1 para no header; stall=2 para no payload. */
-    for (int stall = 1; stall <= 2; stall++) {
+    /* Deadline com REQ pendente ou no meio da resposta: -1
+     * (terminal), nao -2 — uma resposta ficou a dever ou o stream
+     * perdeu a posicao; retry exige reconectar.
+     * stall=1 header, stall=2 payload, stall=3 sem resposta. */
+    for (int stall = 1; stall <= 3; stall++) {
         __atomic_store_n(&g_stall, stall, __ATOMIC_RELEASE);
         int l2 = socket(AF_INET, SOCK_STREAM, 0);
         assert(l2 >= 0);
