@@ -101,6 +101,29 @@ long parse_long(const char *s, const char *name, long lo, long hi)
     return v;
 }
 
+// Vsock service ports are 32-bit (encoded as the first field of the
+// hvsocket service GUID), unlike TCP's 16-bit — accept the full
+// unsigned range here and bound it at the TCP call site instead.
+// strtoull because Windows long is 32-bit and could not hold the cap.
+uint32_t parse_port(const char *s, const char *name)
+{
+    if (!s || !*s || *s == '-') {
+        fprintf(stderr, "hvcam-host: invalid %s '%s' (need 1..4294967295)\n",
+                name, s ? s : "");
+        exit(2);
+    }
+    char *end = nullptr;
+    errno = 0;
+    unsigned long long v = strtoull(s, &end, 10);
+    if (errno == ERANGE || end == s || *end != '\0' ||
+        v < 1 || v > 0xFFFFFFFFull) {
+        fprintf(stderr, "hvcam-host: invalid %s '%s' (need 1..4294967295)\n",
+                name, s);
+        exit(2);
+    }
+    return (uint32_t)v;
+}
+
 void usage()
 {
     fprintf(stderr,
@@ -144,7 +167,7 @@ int main(int argc, char **argv)
         else if (a == "--device")
             opts.device_index = (int)parse_long(need("--device"), "--device", 0, 64);
         else if (a == "--port")
-            port = (uint32_t)parse_long(need("--port"), "--port", 1, 65535);
+            port = parse_port(need("--port"), "--port");
         else if (a == "--width")
             opts.width = (int)parse_long(need("--width"), "--width", 0, 16384);
         else if (a == "--height")
@@ -187,6 +210,11 @@ int main(int argc, char **argv)
             usage();
             return 2;
         }
+    }
+
+    if (!tcp_ip.empty() && port > 65535) {
+        fprintf(stderr, "hvcam-host: TCP port must be 1..65535\n");
+        return 2;
     }
 
     if (do_register || do_unregister)

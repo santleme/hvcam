@@ -66,7 +66,10 @@ int main(int argc, char **argv)
         if (!strcmp(argv[i], "--tcp") && i + 1 < argc) {
             tcp = argv[++i];
         } else if (!strcmp(argv[i], "-p") && i + 1 < argc) {
-            port = (uint32_t)parse_long(argv[++i], "-p", 1, 65535);
+            /* vsock service ports are 32-bit (GUID field), unlike
+             * TCP's 16-bit — the TCP bound is enforced below only
+             * when --tcp mode is actually selected. */
+            port = (uint32_t)parse_long(argv[++i], "-p", 1, 4294967295L);
         } else if (!strcmp(argv[i], "-n") && i + 1 < argc) {
             max_frames = (int)parse_long(argv[++i], "-n", 0, INT_MAX);
         } else if (!strcmp(argv[i], "-t") && i + 1 < argc) {
@@ -94,6 +97,10 @@ int main(int argc, char **argv)
             tcp = host;
         } else if (!*tcp) {
             fprintf(stderr, "hvcam-dump: empty --tcp host\n");
+            return 2;
+        }
+        if (port > 65535) {
+            fprintf(stderr, "hvcam-dump: TCP port must be 1..65535\n");
             return 2;
         }
         fd = hvcam_connect_tcp(tcp, (uint16_t)port);
