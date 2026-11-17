@@ -102,6 +102,7 @@ import hvcam                 # bindings/python/hvcam.py
 cam = hvcam.Camera()         # vsock :8765
 info, raw = cam.grab()       # newest frame — zero-copy np view
 bgr = cam.to_bgr(info, raw)  # optional cv2 conversion
+# raw is overwritten by the next grab() — call raw.copy() to keep it
 ```
 
 `grab()` needs `libhvcam.so` on `LD_LIBRARY_PATH` or next to `hvcam.py`.
