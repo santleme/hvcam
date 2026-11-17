@@ -8,6 +8,7 @@
 #include "hvcam_client.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <poll.h>
 #include <string.h>
 #include <unistd.h>
@@ -37,8 +38,10 @@ static int wait_readable(int fd, int64_t deadline_us)
         int64_t left = deadline_us - now_us();
         if (left <= 0)
             return -2;
-        int ms = (int)(left / 1000) + (left % 1000 ? 1 : 0);
-        int r = poll(&pfd, 1, ms);
+        int64_t ms64 = left / 1000 + (left % 1000 ? 1 : 0);
+        if (ms64 > INT_MAX)
+            ms64 = INT_MAX; /* poll takes int; INT_MAX is ~24 days */
+        int r = poll(&pfd, 1, (int)ms64);
         if (r < 0 && errno == EINTR)
             continue;
         if (r == 0)
@@ -204,19 +207,31 @@ int hvcam_grab_next(int fd, HvFrameHeader *hdr, void *payload,
      * seq does not count as a new frame — wait until the deadline.
      *
      * -2 is only returned with a consistent connection: the deadline
-     * is checked BEFORE each REQ goes out. Timing out with a REQ
-     * already on the wire leaves a reply owed — the next grab would
-     * read that late reply as if it were new — so that is -1
-     * (reconnect required). */
+     * is checked BEFORE each REQ goes out, and a REQ is only sent
+     * when its reply can still be drained before the deadline.
+     * Timing out with a REQ already on the wire leaves a reply owed
+     * — the next grab would read that late reply as if it were new —
+     * so that is -1 (reconnect required). */
     int64_t deadline_us = now_us() + (int64_t)timeout_ms * 1000;
+    /* Floor for "a REQ can go out and its header can come back";
+     * without it the last iteration would fire a REQ microseconds
+     * before the deadline and then hit the mid-response -1 path.
+     * Retries only: the first REQ goes out on any positive budget,
+     * or timeouts shorter than the floor could never poll at all. */
+    const int64_t min_req_us = 20000;
+    int drained = 0; /* a complete response already came back */
     for (;;) {
-        if (now_us() >= deadline_us)
+        int64_t left = deadline_us - now_us();
+        if (left <= 0)
             return -2;
+        if (drained && left < min_req_us)
+            return -2; /* no REQ outstanding: safe to retry later */
         int n = pull_frame(fd, hdr, payload, cap, deadline_us);
         if (n == -2)
             return -1; /* unanswered REQ: a reply is still owed on the wire */
         if (n < 0)
             return n;
+        drained = 1; /* full reply consumed: no REQ left on the wire */
         if ((hdr->flags & 1) && hdr->seq_num != *last_seq) {
             *last_seq = hdr->seq_num;
             return n;

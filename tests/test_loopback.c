@@ -166,6 +166,16 @@ int main(void)
     n = hvcam_grab_next(fd, &hdr, buf, sizeof(buf), &last, 120);
     assert(n == -2);
 
+    /* budget below the retry reserve still polls once: -2 would
+     * mean the REQ never left. A fast loopback returns the frame;
+     * a slow one may legitimately desync to -1 (REQ outstanding at
+     * the deadline) — anything but a blind -2 proves the poll. */
+    seq_store(6);
+    n = hvcam_grab_next(fd, &hdr, buf, sizeof(buf), &last, 10);
+    assert(n != -2);
+    if (n > 0)
+        assert(hdr.seq_num == 6);
+
     hvcam_close(fd);
     close(lfd);
     pthread_join(tid, NULL);
