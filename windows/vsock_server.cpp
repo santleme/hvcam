@@ -111,23 +111,24 @@ int accept_loop(SOCKET listener, FrameSlots *slots, const char *kind,
             Sleep(50);
             continue;
         }
-        // Controle de acesso: um frame de webcam nao sai pra
-        // qualquer particao que conheca a porta. Se --vm-guid foi
-        // dado, so aquela VM passa; senao o bind CHILDREN ja limita
-        // a filhos do host, e o VmId fica registrado pra auditoria.
+        // Access control: webcam frames do not go to just any
+        // partition that knows the port. With --vm-guid only that VM
+        // passes; otherwise the CHILDREN bind already restricts to
+        // this host's child partitions, and the VmId is logged for
+        // audit.
         if (!is_tcp && plen >= (int)sizeof(SOCKADDR_HV)) {
             char gstr[48];
             guid_to_string(peer.VmId, gstr, sizeof(gstr));
             if (allowed_vm &&
                 memcmp(&peer.VmId, allowed_vm, sizeof(GUID)) != 0) {
-                fprintf(stderr, "hvcam: rejeitado guest %s (nao e --vm-guid)\n",
+                fprintf(stderr, "hvcam: rejected guest %s (not --vm-guid)\n",
                         gstr);
                 closesocket(c);
                 continue;
             }
-            fprintf(stderr, "hvcam: cliente %s conectou (vm=%s)\n", kind, gstr);
+            fprintf(stderr, "hvcam: %s client connected (vm=%s)\n", kind, gstr);
         } else {
-            fprintf(stderr, "hvcam: cliente %s conectou\n", kind);
+            fprintf(stderr, "hvcam: %s client connected\n", kind);
         }
         if (is_tcp) {
             BOOL one = TRUE;
@@ -136,7 +137,7 @@ int accept_loop(SOCKET listener, FrameSlots *slots, const char *kind,
         }
         serve_client(c, slots);
         closesocket(c);
-        fprintf(stderr, "hvcam: cliente saiu\n");
+        fprintf(stderr, "hvcam: client left\n");
     }
     return 0;
 }
@@ -148,29 +149,30 @@ int run_server_vsock(FrameSlots *slots, uint32_t port,
 {
     SOCKET l = socket(AF_HYPERV, SOCK_STREAM, HV_PROTOCOL_RAW);
     if (l == INVALID_SOCKET) {
-        fprintf(stderr, "hvcam: socket AF_HYPERV falhou (WSA %d)\n",
+        fprintf(stderr, "hvcam: AF_HYPERV socket failed (WSA %d)\n",
                 WSAGetLastError());
         return 1;
     }
     SOCKADDR_HV a{};
     a.Family = AF_HYPERV;
-    // WILDCARD deixaria qualquer particao se conectar e puxar frames.
-    // CHILDREN restringe a particoes filhas do host (onde o WSL2 vive).
-    // --vm-guid vai mais longe: um unico guest, verificado no accept.
+    // WILDCARD would let any partition connect and pull frames.
+    // CHILDREN restricts to this host's child partitions (where WSL2
+    // lives). --vm-guid goes further: one single guest, checked at
+    // accept.
     a.VmId = allowed_vm ? *allowed_vm : HV_GUID_CHILDREN;
     a.ServiceId = service_guid_for_port(port);
     if (bind(l, (const sockaddr *)&a, sizeof(a)) == SOCKET_ERROR) {
-        fprintf(stderr, "hvcam: bind vsock porta %u falhou (WSA %d)\n",
+        fprintf(stderr, "hvcam: vsock bind port %u failed (WSA %d)\n",
                 port, WSAGetLastError());
         closesocket(l);
         return 1;
     }
     if (listen(l, 2) == SOCKET_ERROR) {
-        fprintf(stderr, "hvcam: listen vsock falhou\n");
+        fprintf(stderr, "hvcam: vsock listen failed\n");
         closesocket(l);
         return 1;
     }
-    fprintf(stderr, "hvcam: escutando vsock porta %u (WSL: cid=2)\n", port);
+    fprintf(stderr, "hvcam: listening vsock port %u (WSL: cid=2)\n", port);
     return accept_loop(l, slots, "vsock", false, allowed_vm);
 }
 
@@ -178,7 +180,7 @@ int run_server_tcp(FrameSlots *slots, const char *bind_ip, uint16_t port)
 {
     SOCKET l = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (l == INVALID_SOCKET) {
-        fprintf(stderr, "hvcam: socket TCP falhou\n");
+        fprintf(stderr, "hvcam: TCP socket failed\n");
         return 1;
     }
     sockaddr_in a{};
@@ -186,21 +188,21 @@ int run_server_tcp(FrameSlots *slots, const char *bind_ip, uint16_t port)
     a.sin_port = htons(port);
     if (inet_pton(AF_INET, bind_ip && *bind_ip ? bind_ip : "127.0.0.1",
                   &a.sin_addr) != 1) {
-        fprintf(stderr, "hvcam: ip de bind invalido: %s\n", bind_ip);
+        fprintf(stderr, "hvcam: invalid bind ip: %s\n", bind_ip);
         closesocket(l);
         return 1;
     }
     if (bind(l, (const sockaddr *)&a, sizeof(a)) == SOCKET_ERROR) {
-        fprintf(stderr, "hvcam: bind tcp %s:%u falhou (WSA %d)\n",
+        fprintf(stderr, "hvcam: tcp bind %s:%u failed (WSA %d)\n",
                 bind_ip, port, WSAGetLastError());
         closesocket(l);
         return 1;
     }
     if (listen(l, 2) == SOCKET_ERROR) {
-        fprintf(stderr, "hvcam: listen tcp falhou\n");
+        fprintf(stderr, "hvcam: tcp listen failed\n");
         closesocket(l);
         return 1;
     }
-    fprintf(stderr, "hvcam: escutando tcp %s:%u\n", bind_ip, port);
+    fprintf(stderr, "hvcam: listening tcp %s:%u\n", bind_ip, port);
     return accept_loop(l, slots, "tcp", true, nullptr);
 }
