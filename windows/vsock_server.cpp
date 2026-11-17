@@ -3,9 +3,10 @@
 // WSL2 vsock interop: a Linux guest connecting to VMADDR_CID_HOST
 // (cid 2) on port P reaches the Windows socket bound to
 // AF_HYPERV/SOCK_STREAM/HV_PROTOCOL_RAW with ServiceId =
-// {P as DWORD}-facb-11e6-bd58-64006a7986d3 and VmId = HV_GUID_WILDCARD
-// (accepts any child partition). This is the documented WSL2
-// hvsocket service template.
+// {P as DWORD}-facb-11e6-bd58-64006a7986d3. The utility VM only
+// matches a listener bound to its exact VmId (microsoft/WSL#5751) —
+// wildcard never matches it — so the default auto-pin re-detects the
+// id via `wsl -- wslinfo --vm-id` and rebinds when it changes.
 #include "vsock_server.h"
 
 // winsock2 must come before windows.h, or windows.h drags in the
@@ -15,14 +16,18 @@
 #include <ws2tcpip.h>
 #include <hvsocket.h>
 #include <windows.h>
+#include <objbase.h>
 
+#include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 #include "frame_slots.h"
 #include "protocol.h"
 
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "ole32.lib") // CLSIDFromString (detect_wsl_vmid)
 
 namespace {
 
@@ -41,6 +46,30 @@ GUID service_guid_for_port(uint32_t port)
     g.Data4[6] = 0x86;
     g.Data4[7] = 0xd3;
     return g;
+}
+
+// `wsl -- wslinfo --vm-id` reports the running utility VM's id —
+// no admin needed, and every distro shares the same VM. Returns
+// false on any failure (WSL absent, not running, unparseable).
+bool detect_wsl_vmid(GUID *out)
+{
+    FILE *p = _popen("wsl.exe -- wslinfo --vm-id", "r");
+    if (!p)
+        return false;
+    char line[128] = {0};
+    bool ok = fgets(line, sizeof(line), p) != nullptr;
+    _pclose(p);
+    if (!ok)
+        return false;
+    std::string g(line);
+    while (!g.empty() && isspace((unsigned char)g.back()))
+        g.pop_back();
+    if (g.empty())
+        return false;
+    if (g.front() != '{')
+        g = "{" + g + "}";
+    std::wstring wg(g.begin(), g.end());
+    return SUCCEEDED(CLSIDFromString(wg.c_str(), out));
 }
 
 bool send_all(SOCKET s, const void *buf, int len)
@@ -102,6 +131,106 @@ void guid_to_string(const GUID &g, char *out, size_t cap)
              g.Data4[4], g.Data4[5], g.Data4[6], g.Data4[7]);
 }
 
+struct VsockBind {
+    SOCKET sock = INVALID_SOCKET;
+    GUID vm{};             // valid only when pinned
+    bool pinned = false;   // false = wildcard bind
+};
+
+// Non-blocking listener: the accept loop polls it, which is also
+// what lets the WSL re-pin run between clients.
+SOCKET listen_vsock(uint32_t port, const GUID *vmid)
+{
+    SOCKET l = socket(AF_HYPERV, SOCK_STREAM, HV_PROTOCOL_RAW);
+    if (l == INVALID_SOCKET) {
+        fprintf(stderr, "hvcam: AF_HYPERV socket failed (WSA %d)\n",
+                WSAGetLastError());
+        return INVALID_SOCKET;
+    }
+    SOCKADDR_HV a{};
+    a.Family = AF_HYPERV;
+    a.VmId = vmid ? *vmid : HV_GUID_WILDCARD;
+    a.ServiceId = service_guid_for_port(port);
+    if (bind(l, (const sockaddr *)&a, sizeof(a)) == SOCKET_ERROR) {
+        fprintf(stderr, "hvcam: vsock bind port %u failed (WSA %d)\n",
+                port, WSAGetLastError());
+        closesocket(l);
+        return INVALID_SOCKET;
+    }
+    if (listen(l, 2) == SOCKET_ERROR) {
+        fprintf(stderr, "hvcam: vsock listen failed\n");
+        closesocket(l);
+        return INVALID_SOCKET;
+    }
+    u_long one = 1;
+    if (ioctlsocket(l, FIONBIO, &one) != 0) {
+        fprintf(stderr, "hvcam: vsock nonblock failed\n");
+        closesocket(l);
+        return INVALID_SOCKET;
+    }
+    return l;
+}
+
+// The utility VM id changes on every WSL boot/idle shutdown — while
+// idle, re-check it and swap the listener when it moves. Runs only
+// between clients, so a served connection is never cut mid-stream.
+void rebind_if_vmid_changed(VsockBind *b, uint32_t port)
+{
+    GUID cur{};
+    if (!detect_wsl_vmid(&cur))
+        return; // transient failure or WSL off: keep the current bind
+    if (b->pinned && memcmp(&b->vm, &cur, sizeof(GUID)) == 0)
+        return;
+    SOCKET nl = listen_vsock(port, &cur);
+    if (nl == INVALID_SOCKET)
+        return; // a stale bind still beats no bind
+    closesocket(b->sock);
+    b->sock = nl;
+    b->vm = cur;
+    b->pinned = true;
+    char gstr[48];
+    guid_to_string(cur, gstr, sizeof(gstr));
+    fprintf(stderr, "hvcam: re-pinned vsock bind to WSL vm %s\n", gstr);
+}
+
+int vsock_accept_loop(VsockBind *b, uint32_t port, FrameSlots *slots,
+                      bool auto_pin)
+{
+    ULONGLONG last_detect = GetTickCount64();
+    for (;;) {
+        SOCKADDR_HV peer{};
+        int plen = sizeof(peer);
+        SOCKET c = accept(b->sock, (sockaddr *)&peer, &plen);
+        if (c == INVALID_SOCKET) {
+            Sleep(50);
+            if (auto_pin && GetTickCount64() - last_detect > 4000) {
+                last_detect = GetTickCount64();
+                rebind_if_vmid_changed(b, port);
+            }
+            continue;
+        }
+        // Accepted sockets inherit the listener's non-blocking
+        // mode on Windows — restore blocking before serving.
+        u_long zero = 0;
+        ioctlsocket(c, FIONBIO, &zero);
+        // Access control: a pinned bind already restricts which VM
+        // can reach us; the accept check keeps the reject visible.
+        char gstr[48];
+        guid_to_string(peer.VmId, gstr, sizeof(gstr));
+        if (b->pinned && memcmp(&peer.VmId, &b->vm, sizeof(GUID)) != 0) {
+            fprintf(stderr, "hvcam: rejected guest %s (not pinned vm)\n",
+                    gstr);
+            closesocket(c);
+            continue;
+        }
+        fprintf(stderr, "hvcam: vsock client connected (vm=%s)\n", gstr);
+        serve_client(c, slots);
+        closesocket(c);
+        fprintf(stderr, "hvcam: client left\n");
+    }
+    return 0;
+}
+
 int accept_loop(SOCKET listener, FrameSlots *slots, const char *kind,
                 bool is_tcp, const GUID *allowed_vm)
 {
@@ -147,40 +276,38 @@ int accept_loop(SOCKET listener, FrameSlots *slots, const char *kind,
 } // namespace
 
 int run_server_vsock(FrameSlots *slots, uint32_t port,
-                     const GUID *allowed_vm)
+                     const GUID *vm_guid, bool auto_pin)
 {
-    SOCKET l = socket(AF_HYPERV, SOCK_STREAM, HV_PROTOCOL_RAW);
-    if (l == INVALID_SOCKET) {
-        fprintf(stderr, "hvcam: AF_HYPERV socket failed (WSA %d)\n",
-                WSAGetLastError());
-        return 1;
+    VsockBind b;
+    if (vm_guid) {
+        b.sock = listen_vsock(port, vm_guid);
+        b.vm = *vm_guid;
+        b.pinned = true;
+    } else if (auto_pin) {
+        GUID wsl{};
+        if (detect_wsl_vmid(&wsl)) {
+            b.sock = listen_vsock(port, &wsl);
+            b.vm = wsl;
+            b.pinned = true;
+        }
     }
-    SOCKADDR_HV a{};
-    a.Family = AF_HYPERV;
-    // WSL2's utility VM only matches listeners bound to its exact
-    // VmId (microsoft/WSL#5751) — main() auto-detects it via
-    // wslinfo when --vm-guid is absent. Wildcard is the fallback for
-    // non-WSL Hyper-V guests; access control lives at accept, where
-    // the peer VmId is logged and --vm-guid pins a single guest.
-    a.VmId = allowed_vm ? *allowed_vm : HV_GUID_WILDCARD;
-    a.ServiceId = service_guid_for_port(port);
-    if (bind(l, (const sockaddr *)&a, sizeof(a)) == SOCKET_ERROR) {
-        fprintf(stderr, "hvcam: vsock bind port %u failed (WSA %d)\n",
-                port, WSAGetLastError());
-        closesocket(l);
+    if (!b.pinned)
+        b.sock = listen_vsock(port, nullptr);
+    if (b.sock == INVALID_SOCKET)
         return 1;
-    }
-    if (listen(l, 2) == SOCKET_ERROR) {
-        fprintf(stderr, "hvcam: vsock listen failed\n");
-        closesocket(l);
-        return 1;
-    }
-    fprintf(stderr, "hvcam: listening vsock port %u (WSL: cid=2)\n", port);
-    if (!allowed_vm)
+    if (b.pinned) {
+        char gstr[48];
+        guid_to_string(b.vm, gstr, sizeof(gstr));
+        fprintf(stderr, "hvcam: listening vsock port %u, pinned to vm %s%s\n",
+                port, gstr, vm_guid ? " (--vm-guid)" : " (wsl auto)");
+    } else {
+        fprintf(stderr, "hvcam: listening vsock port %u (WSL: cid=2)\n", port);
         fprintf(stderr,
-                "hvcam: warning — no --vm-guid; any child partition can "
-                "pull webcam frames (peer VmIds are logged at accept)\n");
-    return accept_loop(l, slots, "vsock", false, allowed_vm);
+                "hvcam: warning — wildcard bind; non-WSL guests can pull "
+                "frames (peer VmIds are logged at accept)\n");
+    }
+    // auto_pin re-detects only while no explicit --vm-guid is set.
+    return vsock_accept_loop(&b, port, slots, auto_pin && !vm_guid);
 }
 
 int run_server_tcp(FrameSlots *slots, const char *bind_ip, uint16_t port)

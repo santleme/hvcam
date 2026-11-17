@@ -15,7 +15,6 @@
 #include <winreg.h>
 
 #include <cerrno>
-#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -125,32 +124,6 @@ uint32_t parse_port(const char *s, const char *name)
     return (uint32_t)v;
 }
 
-// WSL2's utility VM only connects to listeners bound to its EXACT
-// VmId — wildcard binds never match (microsoft/WSL#5751). When the
-// user did not pin --vm-guid, discover the running WSL VM with
-// `wsl -- wslinfo --vm-id` (no admin needed; all distros share one
-// utility VM) and bind to it. Returns false on any failure.
-bool detect_wsl_vmid(GUID *out)
-{
-    FILE *p = _popen("wsl.exe -- wslinfo --vm-id", "r");
-    if (!p)
-        return false;
-    char line[128] = {0};
-    bool ok = fgets(line, sizeof(line), p) != nullptr;
-    _pclose(p);
-    if (!ok)
-        return false;
-    std::string g(line);
-    while (!g.empty() && isspace((unsigned char)g.back()))
-        g.pop_back();
-    if (g.empty())
-        return false;
-    if (g.front() != '{')
-        g = "{" + g + "}";
-    std::wstring wg(g.begin(), g.end());
-    return SUCCEEDED(CLSIDFromString(wg.c_str(), out));
-}
-
 void usage()
 {
     fprintf(stderr,
@@ -162,6 +135,8 @@ void usage()
         "  --fps N               requested frame rate\n"
         "  --tcp IP[:PORT]       TCP mode bound to IP (default: vsock)\n"
         "  --vm-guid GUID        accept vsock only from that VM\n"
+        "  --no-auto-pin         keep the wildcard vsock bind; do not\n"
+        "                        auto-pin to the running WSL VM\n"
         "  --register-vsock      one-time admin: register the vsock\n"
         "                        service GUID so guests can connect\n"
         "  --unregister-vsock    remove that registration\n"
@@ -178,6 +153,7 @@ int main(int argc, char **argv)
     std::string tcp_ip;
     GUID allowed_vm{};
     bool have_vm_guid = false;
+    bool no_auto_pin = false;
     bool do_list = false;
     bool do_register = false, do_unregister = false;
 
@@ -231,6 +207,7 @@ int main(int argc, char **argv)
         }
         else if (a == "--lock-exposure") opts.lock_exposure = true;
         else if (a == "--lock-focus") opts.lock_focus = true;
+        else if (a == "--no-auto-pin") no_auto_pin = true;
         else if (a == "--register-vsock") do_register = true;
         else if (a == "--unregister-vsock") do_unregister = true;
         else {
@@ -256,17 +233,9 @@ int main(int argc, char **argv)
         return devs.empty() ? 1 : 0;
     }
 
-    // vsock without --vm-guid: pin the bind to the running WSL VM.
-    // Wildcard stays the fallback for non-WSL Hyper-V guests, but
-    // WSL's utility VM will never match it — detection is the only
-    // way this transport works out of the box for the target case.
-    if (tcp_ip.empty() && !have_vm_guid && detect_wsl_vmid(&allowed_vm)) {
-        have_vm_guid = true;
-        wchar_t gbuf[40];
-        StringFromGUID2(allowed_vm, gbuf, 40);
-        fprintf(stderr, "hvcam: pinned vsock bind to WSL vm %ls\n", gbuf);
-    }
-
+    // vsock: with no explicit --vm-guid and no --no-auto-pin, the
+    // server auto-pins the bind to the running WSL VM and re-pins
+    // when its id changes (WSL boots get a fresh VmId each time).
     WSADATA wsa{};
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         fprintf(stderr, "hvcam-host: WSAStartup failed\n");
@@ -282,7 +251,8 @@ int main(int argc, char **argv)
                 cam.width(), cam.height(), cam.format());
         int rc = tcp_ip.empty()
                      ? run_server_vsock(&slots, port,
-                                        have_vm_guid ? &allowed_vm : nullptr)
+                                        have_vm_guid ? &allowed_vm : nullptr,
+                                        !have_vm_guid && !no_auto_pin)
                      : run_server_tcp(&slots, tcp_ip.c_str(), (uint16_t)port);
         cam.close();
         WSACleanup();
