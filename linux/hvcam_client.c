@@ -3,6 +3,8 @@
  * Primary transport is AF_VSOCK to the Hyper-V host (VMADDR_CID_HOST);
  * a TCP fallback exists for development and non-WSL environments.
  */
+#define _POSIX_C_SOURCE 200809L /* clock_gettime + poll sob -std=c99 */
+
 #include "hvcam_client.h"
 
 #include <errno.h>
@@ -14,17 +16,55 @@
 #include <netdb.h>
 #include <stdio.h>
 #include <sys/socket.h>
+#include <time.h>
 
-static int read_full(int fd, void *buf, size_t n)
+static int64_t now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000ll + ts.tv_nsec / 1000;
+}
+
+/* Waits for the fd to be readable or the deadline to pass.
+ * Returns 0 ready, -2 timeout, -1 error/peer-close. */
+static int wait_readable(int fd, int64_t deadline_us)
+{
+    int64_t left = deadline_us - now_us();
+    if (left <= 0)
+        return -2;
+    struct pollfd pfd = {fd, POLLIN, 0};
+    int ms = (int)(left / 1000) + (left % 1000 ? 1 : 0);
+    int r;
+    do {
+        r = poll(&pfd, 1, ms);
+    } while (r < 0 && errno == EINTR);
+    if (r == 0)
+        return -2;
+    if (r < 0)
+        return -1;
+    if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))
+        return -1;
+    return 0;
+}
+
+/* deadline_us == INT64_MAX -> bloqueante (modo sem timeout). */
+static int read_full(int fd, void *buf, size_t n, int64_t deadline_us)
 {
     uint8_t *p = (uint8_t *)buf;
     while (n > 0) {
+        if (deadline_us != INT64_MAX) {
+            int w = wait_readable(fd, deadline_us);
+            if (w)
+                return w;
+        }
         ssize_t r = recv(fd, p, n, 0);
         if (r == 0)
             return -1; /* peer closed */
         if (r < 0) {
             if (errno == EINTR)
                 continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                continue; /* deadline ainda vale no proximo poll */
             return -1;
         }
         p += r;
@@ -96,14 +136,18 @@ int hvcam_connect_tcp(const char *host, uint16_t port)
     return fd;
 }
 
-/* Reads one frame after sending REQ. Shared by grab/grab_next. */
-static int pull_frame(int fd, HvFrameHeader *hdr, void *payload, uint32_t cap)
+/* Reads one frame after sending REQ. Shared by grab/grab_next.
+ * deadline_us cobre TUDO: o REQ, o header e o payload inteiro —
+ * um peer que trava no meio da resposta nao passa do prazo. */
+static int pull_frame(int fd, HvFrameHeader *hdr, void *payload,
+                      uint32_t cap, int64_t deadline_us)
 {
     uint8_t req = HVCAM_REQ;
     if (write_full(fd, &req, 1) < 0)
         return -1;
-    if (read_full(fd, hdr, sizeof(*hdr)) < 0)
-        return -1;
+    int rc = read_full(fd, hdr, sizeof(*hdr), deadline_us);
+    if (rc)
+        return rc;
     if (hdr->magic != HVCAM_MAGIC || hdr->version != HVCAM_VERSION ||
         hdr->payload_bytes > HVCAM_MAX_PAYLOAD)
         return -1;
@@ -123,8 +167,9 @@ static int pull_frame(int fd, HvFrameHeader *hdr, void *payload, uint32_t cap)
         }
         if (chunk == 0)
             chunk = remaining > sizeof(scratch) ? (uint32_t)sizeof(scratch) : remaining;
-        if (read_full(fd, dst, chunk) < 0)
-            return -1;
+        rc = read_full(fd, dst, chunk, deadline_us);
+        if (rc)
+            return rc;
         if (dst != scratch)
             stored += chunk;
         remaining -= chunk;
@@ -134,35 +179,31 @@ static int pull_frame(int fd, HvFrameHeader *hdr, void *payload, uint32_t cap)
 
 int hvcam_grab(int fd, HvFrameHeader *hdr, void *payload, uint32_t cap)
 {
-    return pull_frame(fd, hdr, payload, cap);
+    return pull_frame(fd, hdr, payload, cap, INT64_MAX);
 }
 
 int hvcam_grab_next(int fd, HvFrameHeader *hdr, void *payload,
                     uint32_t cap, uint64_t *last_seq, int timeout_ms)
 {
-    /* Bounded wait: polls the socket; the host answers each REQ with
-     * the newest frame, so a repeated seq means "nothing newer yet".
-     * We REQ, and if seq repeats we poll-wait then REQ again — keeps
-     * traffic at one in-flight request per poll turn. */
-    int elapsed = 0;
-    const int step = 40;
+    /* Um unico prazo cobre todo o wait: REQ, headers e payloads.
+     * Resposta placeholder (flags bit0=0) ou seq repetida nao conta
+     * como frame novo — espera ate o prazo. */
+    int64_t deadline_us = now_us() + (int64_t)timeout_ms * 1000;
     for (;;) {
-        int n = pull_frame(fd, hdr, payload, cap);
+        int n = pull_frame(fd, hdr, payload, cap, deadline_us);
         if (n < 0)
             return n;
-        if (!(hdr->flags & 1)) /* no real frame yet */
-            return n;
-        if (hdr->seq_num != *last_seq) {
+        if ((hdr->flags & 1) && hdr->seq_num != *last_seq) {
             *last_seq = hdr->seq_num;
             return n;
         }
-        if (elapsed >= timeout_ms)
+        if (now_us() >= deadline_us)
             return -2;
-        struct pollfd pfd = {fd, POLLIN, 0};
-        /* Cheap retry cadence without busy-spinning. */
-        int r = poll(&pfd, 0, step); /* fd has no buffered data; just sleep */
-        (void)r;
-        elapsed += step;
+        /* Respiro entre REQs: dorme ~15ms e detecta queda do peer
+         * de graca (wait_readable sai cedo em POLLHUP). */
+        int w = wait_readable(fd, now_us() + 15000);
+        if (w == -1)
+            return -1;
     }
 }
 
@@ -179,6 +220,7 @@ const char *hvcam_format_name(uint32_t format)
     case HVCAM_FMT_YUY2: return "yuy2";
     case HVCAM_FMT_NV12: return "nv12";
     case HVCAM_FMT_MJPEG: return "mjpeg";
+    case HVCAM_FMT_BGRX32: return "bgrx32";
     default: return "unknown";
     }
 }

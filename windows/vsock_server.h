@@ -9,11 +9,14 @@
 // mirrored-networking WSL, non-WSL guests).
 #pragma once
 
+#include <guiddef.h>
 #include <stdint.h>
 
 class FrameSlots;
 
 // Runs the accept loop forever (until process signal).
 // vsock port is the hvsocket service port; tcp_ip empty = vsock mode.
-int run_server_vsock(FrameSlots *slots, uint32_t port);
+// allowed_vm != nullptr trava o accept naquela unica particao.
+int run_server_vsock(FrameSlots *slots, uint32_t port,
+                     const GUID *allowed_vm);
 int run_server_tcp(FrameSlots *slots, const char *bind_ip, uint16_t port);

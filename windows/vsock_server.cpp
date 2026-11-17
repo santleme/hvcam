@@ -91,16 +91,44 @@ void serve_client(SOCKET c, FrameSlots *slots)
     }
 }
 
+void guid_to_string(const GUID &g, char *out, size_t cap)
+{
+    snprintf(out, cap,
+             "%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+             (unsigned long)g.Data1, g.Data2, g.Data3,
+             g.Data4[0], g.Data4[1], g.Data4[2], g.Data4[3],
+             g.Data4[4], g.Data4[5], g.Data4[6], g.Data4[7]);
+}
+
 int accept_loop(SOCKET listener, FrameSlots *slots, const char *kind,
-                bool is_tcp)
+                bool is_tcp, const GUID *allowed_vm)
 {
     for (;;) {
-        SOCKET c = accept(listener, nullptr, nullptr);
+        SOCKADDR_HV peer{};
+        int plen = sizeof(peer);
+        SOCKET c = accept(listener, (sockaddr *)&peer, &plen);
         if (c == INVALID_SOCKET) {
             Sleep(50);
             continue;
         }
-        fprintf(stderr, "hvcam: cliente %s conectou\n", kind);
+        // Controle de acesso: um frame de webcam nao sai pra
+        // qualquer particao que conheca a porta. Se --vm-guid foi
+        // dado, so aquela VM passa; senao o bind CHILDREN ja limita
+        // a filhos do host, e o VmId fica registrado pra auditoria.
+        if (!is_tcp && plen >= (int)sizeof(SOCKADDR_HV)) {
+            char gstr[48];
+            guid_to_string(peer.VmId, gstr, sizeof(gstr));
+            if (allowed_vm &&
+                memcmp(&peer.VmId, allowed_vm, sizeof(GUID)) != 0) {
+                fprintf(stderr, "hvcam: rejeitado guest %s (nao e --vm-guid)\n",
+                        gstr);
+                closesocket(c);
+                continue;
+            }
+            fprintf(stderr, "hvcam: cliente %s conectou (vm=%s)\n", kind, gstr);
+        } else {
+            fprintf(stderr, "hvcam: cliente %s conectou\n", kind);
+        }
         if (is_tcp) {
             BOOL one = TRUE;
             setsockopt(c, IPPROTO_TCP, TCP_NODELAY,
@@ -115,7 +143,8 @@ int accept_loop(SOCKET listener, FrameSlots *slots, const char *kind,
 
 } // namespace
 
-int run_server_vsock(FrameSlots *slots, uint32_t port)
+int run_server_vsock(FrameSlots *slots, uint32_t port,
+                     const GUID *allowed_vm)
 {
     SOCKET l = socket(AF_HYPERV, SOCK_STREAM, HV_PROTOCOL_RAW);
     if (l == INVALID_SOCKET) {
@@ -125,7 +154,10 @@ int run_server_vsock(FrameSlots *slots, uint32_t port)
     }
     SOCKADDR_HV a{};
     a.Family = AF_HYPERV;
-    a.VmId = HV_GUID_WILDCARD; // qualquer particao filha (o WSL2)
+    // WILDCARD deixaria qualquer particao se conectar e puxar frames.
+    // CHILDREN restringe a particoes filhas do host (onde o WSL2 vive).
+    // --vm-guid vai mais longe: um unico guest, verificado no accept.
+    a.VmId = allowed_vm ? *allowed_vm : HV_GUID_CHILDREN;
     a.ServiceId = service_guid_for_port(port);
     if (bind(l, (const sockaddr *)&a, sizeof(a)) == SOCKET_ERROR) {
         fprintf(stderr, "hvcam: bind vsock porta %u falhou (WSA %d)\n",
@@ -139,7 +171,7 @@ int run_server_vsock(FrameSlots *slots, uint32_t port)
         return 1;
     }
     fprintf(stderr, "hvcam: escutando vsock porta %u (WSL: cid=2)\n", port);
-    return accept_loop(l, slots, "vsock", false);
+    return accept_loop(l, slots, "vsock", false, allowed_vm);
 }
 
 int run_server_tcp(FrameSlots *slots, const char *bind_ip, uint16_t port)
@@ -170,5 +202,5 @@ int run_server_tcp(FrameSlots *slots, const char *bind_ip, uint16_t port)
         return 1;
     }
     fprintf(stderr, "hvcam: escutando tcp %s:%u\n", bind_ip, port);
-    return accept_loop(l, slots, "tcp", true);
+    return accept_loop(l, slots, "tcp", true, nullptr);
 }

@@ -24,6 +24,7 @@
 #include <windows.h>
 
 #include <atomic>
+#include <climits>
 #include <cstdio>
 #include <stdexcept>
 #include <string>
@@ -55,7 +56,7 @@ uint32_t subtype_to_fmt(const GUID &sub)
     if (sub == MFVideoFormat_NV12) return HVCAM_FMT_NV12;
     if (sub == MFVideoFormat_MJPG) return HVCAM_FMT_MJPEG;
     if (sub == MFVideoFormat_RGB24) return HVCAM_FMT_BGR24;
-    if (sub == MFVideoFormat_RGB32) return HVCAM_FMT_BGR24; // stride differs; flagged in log
+    if (sub == MFVideoFormat_RGB32) return HVCAM_FMT_BGRX32; // 4B/px declarado
     return 0;
 }
 
@@ -122,8 +123,17 @@ public:
     {
         (void)streamIndex;
         if (FAILED(hrStatus)) {
-            fprintf(stderr, "hvcam: OnReadSample hr=0x%08lx\n",
-                    (unsigned long)hrStatus);
+            // Erro de leitura: rearma a bomba — um erro transiente
+            // nao pode congelar o stream. Passou de 100 falhas
+            // seguidas, marca terminal (a camera provavelmente morreu).
+            if (++read_errors_ > 100) {
+                if (!ended_.exchange(true))
+                    fprintf(stderr, "hvcam: leituras falhando em sequencia; captura encerrada\n");
+                return S_OK;
+            }
+            if (reader_)
+                reader_->ReadSample((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                                    0, nullptr, nullptr, nullptr, nullptr);
             return S_OK;
         }
         if (streamFlags & MF_SOURCE_READERF_ENDOFSTREAM) {
@@ -131,6 +141,7 @@ public:
             ended_.store(true);
             return S_OK;
         }
+        read_errors_ = 0;
         if (sample) {
             IMFMediaBuffer *buf = nullptr;
             HRESULT hr = sample->ConvertToContiguousBuffer(&buf);
@@ -145,17 +156,14 @@ public:
                         slot->h = (uint16_t)h_;
                         slot->format = fmt_;
                         slot->seq = seq_++;
-                        // Timestamp: sample time (100ns) if present,
-                        // else QPC now — both monotonic.
-                        LONGLONG st = 0;
-                        if (SUCCEEDED(sample->GetSampleTime(&st)) && st > 0)
-                            slot->ts_us = (uint64_t)(st / 10);
-                        else {
-                            LARGE_INTEGER qpc;
-                            QueryPerformanceCounter(&qpc);
-                            slot->ts_us = (uint64_t)(qpc.QuadPart * 1000000ull /
-                                                     qpc_freq_.QuadPart);
-                        }
+                        // Relogio unico: QPC na chegada, sempre.
+                        // Split div/mul evita overflow do *1e6 a 10MHz.
+                        LARGE_INTEGER qpc;
+                        QueryPerformanceCounter(&qpc);
+                        uint64_t q = (uint64_t)qpc.QuadPart;
+                        uint64_t f = (uint64_t)qpc_freq_.QuadPart;
+                        slot->ts_us = (q / f) * 1000000ull +
+                                      (q % f) * 1000000ull / f;
                         slots_->publish_write(slot);
                     }
                     buf->Unlock();
@@ -186,6 +194,7 @@ private:
     int w_ = 0, h_ = 0;
     uint32_t fmt_ = 0;
     uint64_t seq_ = 0;
+    std::atomic<int> read_errors_{0};
     std::atomic<bool> ended_{false};
     LARGE_INTEGER qpc_freq_{ []() {
         LARGE_INTEGER f;
@@ -209,6 +218,10 @@ struct MfCapture::Impl {
     void close_all()
     {
         if (reader) {
+            // Flush drena leituras async em voo: o MF completa os
+            // OnReadSample pendentes antes de soltarmos o reader e
+            // o callback — nada fica apontando pra memoria morta.
+            reader->Flush((DWORD)MF_SOURCE_READER_ALL_STREAMS);
             reader->Release();
             reader = nullptr;
         }
@@ -345,8 +358,11 @@ void MfCapture::open(const MfOpenOptions &opts)
     ra->Release();
 
     // --- Negotiate ONCE: pick best native type ----------------------
+    // Subtype nao suportado sai ANTES de pontuar; o primeiro tipo
+    // suportado ja e candidato, entao qualquer score ruim ainda
+    // produz um fallback utilizavel em vez de rejeitar a camera.
     IMFMediaType *best = nullptr;
-    int best_score = -1;
+    int best_score = INT_MIN;
     for (DWORD i = 0;; i++) {
         IMFMediaType *mt = nullptr;
         HRESULT hr = p_->reader->GetNativeMediaType(
@@ -356,6 +372,10 @@ void MfCapture::open(const MfOpenOptions &opts)
         GUID sub = GUID_NULL;
         UINT32 w = 0, h = 0, fn = 0, fd = 0;
         mt->GetGUID(MF_MT_SUBTYPE, &sub);
+        if (!subtype_to_fmt(sub)) {
+            mt->Release();
+            continue;
+        }
         MFGetAttributeSize(mt, MF_MT_FRAME_SIZE, &w, &h);
         MFGetAttributeRatio(mt, MF_MT_FRAME_RATE, &fn, &fd);
         int sc = score_type(sub, w, h, fn, fd, opts);

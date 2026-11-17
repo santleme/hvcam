@@ -26,6 +26,7 @@ enum HvPixelFormat {
     HVCAM_FMT_YUY2 = 2,  /* packed YUV 4:2:2, 2 bytes/px */
     HVCAM_FMT_NV12 = 3,  /* planar Y + interleaved UV */
     HVCAM_FMT_MJPEG = 4, /* camera-native JPEG, payload is a .jpg blob */
+    HVCAM_FMT_BGRX32 = 5, /* 4 bytes/px, BGR + padding byte */
 };
 
 #pragma pack(push, 1)

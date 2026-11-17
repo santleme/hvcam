@@ -28,7 +28,12 @@ static void fill_fake(uint8_t *out, uint64_t seq)
 
 /* Sends one frame per REQ, seq taken from a shared counter that the
  * test advances between requests to simulate "new frame arrived". */
+/* Shared between test thread (writer) and server thread (reader) —
+ * accessed only via __atomic builtins to keep the assertion order
+ * defined under -O2 and TSAN. */
 static uint64_t g_seq;
+#define seq_store(v) __atomic_store_n(&g_seq, (v), __ATOMIC_RELEASE)
+#define seq_load() __atomic_load_n(&g_seq, __ATOMIC_ACQUIRE)
 static int g_serve_n = 64; /* extra REQs: same-seq retry loop spends a few */
 
 static void *server(void *arg)
@@ -49,14 +54,15 @@ static void *server(void *arg)
         hdr.magic = HVCAM_MAGIC;
         hdr.version = HVCAM_VERSION;
         hdr.flags = 1;
-        hdr.seq_num = g_seq;
-        hdr.timestamp_us = 1000000u + g_seq * 33333u;
+        uint64_t s = seq_load();
+        hdr.seq_num = s;
+        hdr.timestamp_us = 1000000u + s * 33333u;
         hdr.width = FAKE_W;
         hdr.height = FAKE_H;
         hdr.format = HVCAM_FMT_YUY2;
         hdr.payload_bytes = FAKE_BYTES;
         uint8_t payload[FAKE_BYTES];
-        fill_fake(payload, g_seq);
+        fill_fake(payload, s);
         send(cfd, &hdr, sizeof(hdr), 0);
         send(cfd, payload, sizeof(payload), 0);
     }
@@ -88,35 +94,35 @@ int main(void)
     uint64_t last = UINT64_MAX;
 
     /* frame 0 */
-    g_seq = 0;
+    seq_store(0);
     int n = hvcam_grab_next(fd, &hdr, buf, sizeof(buf), &last, 500);
     assert(n == FAKE_BYTES);
     assert(hdr.seq_num == 0 && hdr.width == FAKE_W);
     assert(buf[0] == 0 && buf[FAKE_BYTES - 1] == FAKE_BYTES - 1);
 
     /* frame 1 — bigger seq */
-    g_seq = 1;
+    seq_store(1);
     n = hvcam_grab_next(fd, &hdr, buf, sizeof(buf), &last, 500);
     assert(n == FAKE_BYTES && hdr.seq_num == 1 && buf[0] == 1);
 
     /* frame 2 — same seq must not be delivered as "new": advance so
      * the NEXT request returns the fresher seq instead of hanging. */
-    g_seq = 2;
+    seq_store(2);
     n = hvcam_grab_next(fd, &hdr, buf, sizeof(buf), &last, 500);
     assert(n == FAKE_BYTES && hdr.seq_num == 2);
 
     /* undersized buffer: drains full payload, reports cap */
-    g_seq = 3;
+    seq_store(3);
     n = hvcam_grab_next(fd, &hdr, buf, 8, &last, 500);
     assert(n == 8 && hdr.payload_bytes == FAKE_BYTES);
 
     /* header-only grab */
-    g_seq = 4;
+    seq_store(4);
     n = hvcam_grab_next(fd, &hdr, NULL, 0, &last, 500);
     assert(n == 0 && hdr.seq_num == 4);
 
     /* same-seq request hits the -2 timeout path */
-    g_seq = 5;
+    seq_store(5);
     hvcam_grab_next(fd, &hdr, buf, sizeof(buf), &last, 200);
     n = hvcam_grab_next(fd, &hdr, buf, sizeof(buf), &last, 120);
     assert(n == -2);

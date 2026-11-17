@@ -17,7 +17,7 @@ import os
 
 import numpy as np
 
-_FMT_BPP = {1: 3, 2: 2, 3: 1, 4: 1}  # nominal bytes/px; mjpeg = blob
+_FMT_BPP = {1: 3, 2: 2, 3: 1, 4: 1, 5: 4}  # nominal bytes/px; mjpeg = blob
 
 
 class HvFrameHeader(ctypes.Structure):
@@ -39,7 +39,7 @@ def _load():
     here = os.path.dirname(os.path.abspath(__file__))
     for cand in (
         os.path.join(here, "libhvcam.so"),
-        os.path.join(here, "..", "build", "libhvcam.so"),
+        os.path.join(here, "..", "..", "build", "libhvcam.so"),
         "libhvcam.so",
     ):
         try:
@@ -101,9 +101,9 @@ class Camera:
         if n < 0:
             raise OSError("hvcam: stream caiu")
         h = self._hdr
-        arr = np.frombuffer(
-            bytes(bytearray(self._buf[:n])), dtype=np.uint8
-        )
+        # View real sobre o buffer persistente — sobrescrita no
+        # proximo grab(); .copy() se precisar guardar o frame.
+        arr = np.frombuffer(self._buf, dtype=np.uint8, count=n)
         info = {
             "seq": h.seq_num,
             "ts_us": h.timestamp_us,
