@@ -34,7 +34,13 @@ int hvcam_grab(int fd, HvFrameHeader *hdr, void *payload, uint32_t cap);
 
 /* Waits at most `timeout_ms` for a frame with seq_num different from
  * `*last_seq` (pass UINT64_MAX initially). Same return contract as
- * hvcam_grab; returns -2 on timeout (distinct from -1 transport). */
+ * hvcam_grab; returns -2 on timeout (distinct from -1 transport).
+ *
+ * Note on timeouts: -2 means the deadline passed before ANY byte of
+ * the response was consumed — safe to retry on the same connection.
+ * If a deadline expires mid-response (partial header or payload),
+ * the stream position is unrecoverable and this returns -1 instead;
+ * the caller must close and reconnect. */
 int hvcam_grab_next(int fd, HvFrameHeader *hdr, void *payload,
                     uint32_t cap, uint64_t *last_seq, int timeout_ms);
 
