@@ -147,20 +147,25 @@ class Camera:
         if not flags & 1:
             return None
         expected = self._expected_bytes(w, hgt, fmt)
-        if expected is not None and frame.nbytes < expected:
+        # Exact match, not just "big enough": if a row-padded buffer
+        # leaked onto the wire, slicing to `expected` would read the
+        # interleaved padding as pixels and silently corrupt the
+        # image. The wire format has no stride field — reject until
+        # the host repacks tightly (or carries the stride).
+        if expected is not None and frame.nbytes != expected:
             raise ValueError(
-                f"hvcam: short payload {frame.nbytes} < {expected} "
-                f"for {w}x{hgt} fmt={fmt}"
+                f"hvcam: payload {frame.nbytes}B != {expected}B for "
+                f"{w}x{hgt} fmt={fmt} (unpacked stride not supported)"
             )
         if fmt == 1:
-            img = frame[:expected].reshape(hgt, w, 3).copy()
+            img = frame.reshape(hgt, w, 3).copy()
         elif fmt == 2:
             img = cv2.cvtColor(
-                frame[:expected].reshape(hgt, w, 2), cv2.COLOR_YUV2BGR_YUY2
+                frame.reshape(hgt, w, 2), cv2.COLOR_YUV2BGR_YUY2
             )
         elif fmt == 3:
             img = cv2.cvtColor(
-                frame[:expected].reshape(hgt * 3 // 2, w),
+                frame.reshape(hgt * 3 // 2, w),
                 cv2.COLOR_YUV2BGR_NV12,
             )
         elif fmt == 4:
@@ -170,7 +175,7 @@ class Camera:
             return img
         else:
             img = cv2.cvtColor(
-                frame[:expected].reshape(hgt, w, 4), cv2.COLOR_BGRA2BGR
+                frame.reshape(hgt, w, 4), cv2.COLOR_BGRA2BGR
             )
         return cv2.flip(img, 0) if flags & 2 else img
 

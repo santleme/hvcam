@@ -175,6 +175,10 @@ int run_server_vsock(FrameSlots *slots, uint32_t port,
         return 1;
     }
     fprintf(stderr, "hvcam: listening vsock port %u (WSL: cid=2)\n", port);
+    if (!allowed_vm)
+        fprintf(stderr,
+                "hvcam: warning — no --vm-guid; any child partition can "
+                "pull webcam frames (peer VmIds are logged at accept)\n");
     return accept_loop(l, slots, "vsock", false, allowed_vm);
 }
 
