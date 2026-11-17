@@ -16,7 +16,10 @@ class FrameSlots;
 
 // Runs the accept loop forever (until process signal).
 // vsock port is the hvsocket service port; tcp_ip empty = vsock mode.
-// allowed_vm != nullptr locks accept to that one partition.
+// vm_guid != nullptr pins bind+accept to that one partition.
+// auto_pin (only meaningful when vm_guid is null) makes the loop
+// re-detect the WSL utility VM's id every few seconds and rebind —
+// the id changes on every WSL boot.
 int run_server_vsock(FrameSlots *slots, uint32_t port,
-                     const GUID *allowed_vm);
+                     const GUID *vm_guid, bool auto_pin);
 int run_server_tcp(FrameSlots *slots, const char *bind_ip, uint16_t port);
