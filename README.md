@@ -43,9 +43,14 @@ non-WSL guests.
 | Exchange | Three-slot "always newest" buffer — capture and send never block each other |
 | Wire | 1-byte REQ pull → 36-byte `HvFrameHeader` + payload (YUY2, NV12, BGR24, BGRX32, MJPEG). See [`include/protocol.h`](include/protocol.h) |
 
-The host binds `HV_GUID_WILDCARD` (required for WSL interop) and logs every accepted
-vsock peer VmId. On multi-VM or shared hosts, pin the listener with `--vm-guid <GUID>`
-so only that guest can pull frames.
+WSL2's utility VM only connects to listeners bound to its exact VmId — a wildcard
+bind never matches (microsoft/WSL#5751). The host therefore auto-pins the vsock bind
+to the running WSL VM via `wslinfo --vm-id` (no admin needed) and **re-pins
+automatically when the id changes** — the utility VM gets a fresh VmId on every
+`wsl --shutdown`, idle stop, or Windows reboot. Wildcard is the fallback when no
+WSL VM is detected. Every accepted peer VmId is logged; `--vm-guid <GUID>` pins
+explicitly, and `--no-auto-pin` keeps the wildcard bind for serving non-WSL
+Hyper-V guests on a host that also has WSL installed.
 
 ## Getting started
 
@@ -88,7 +93,8 @@ ctest --test-dir build
 hvcam-host --list                              # enumerate UVC cameras
 hvcam-host --device 0 --width 1280 --height 720 --lock-focus
 hvcam-host --tcp 127.0.0.1:8765                # TCP fallback (IP[:port]); unencrypted
-hvcam-host --vm-guid <guid>                    # accept only that guest VM
+hvcam-host --vm-guid <guid>                    # accept only that guest (skips auto-pin)
+hvcam-host --no-auto-pin                       # wildcard bind, never re-pin (non-WSL guests)
 
 # WSL2 — use the same port the host is listening on (default 8765)
 ./build/hvcam-dump                             # print seq/ts/fps for ~5 s
