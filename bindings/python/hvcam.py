@@ -172,7 +172,6 @@ class Camera:
             img = cv2.imdecode(frame, cv2.IMREAD_COLOR)
             if img is None:
                 raise ValueError("hvcam: MJPEG payload failed to decode")
-            return img
         else:
             img = cv2.cvtColor(
                 frame.reshape(hgt, w, 4), cv2.COLOR_BGRA2BGR
