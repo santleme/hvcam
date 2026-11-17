@@ -106,6 +106,7 @@ class Camera:
         info = {
             "seq": h.seq_num,
             "ts_us": h.timestamp_us,
+            "flags": h.flags,
             "width": h.width,
             "height": h.height,
             "format": h.format,
@@ -113,29 +114,65 @@ class Camera:
         }
         return info, arr
 
+    @staticmethod
+    def _expected_bytes(w, h, fmt):
+        """Bytes the wire payload must hold for w x h in `fmt`;
+        None for MJPEG (opaque blob). Unknown fmt -> ValueError."""
+        if fmt == 1:
+            return w * h * 3
+        if fmt == 2:
+            return w * h * 2
+        if fmt == 3:
+            return (h * 3 // 2) * w
+        if fmt == 4:
+            return None
+        if fmt == 5:
+            return w * h * 4
+        raise ValueError(f"hvcam: unknown wire format {fmt}")
+
     def to_bgr(self, info, frame):
         """Converts a grabbed payload to BGR via cv2.cvtColor.
 
         Wire formats (protocol.h): 1=BGR24 2=YUY2 3=NV12 4=MJPEG
-        5=BGRX32. Returns an (h, w, 3) uint8 array. Never slices
-        channels by hand — MJPEG goes through cv2.imdecode, YUV
-        formats through the matching COLOR_YUV2BGR_* code."""
+        5=BGRX32. Returns an (h, w, 3) uint8 array, or None for a
+        placeholder reply (flags bit0 clear). flags bit1
+        (bottom-up rows) flips the raster formats at the end.
+        Never slices channels by hand — MJPEG goes through
+        cv2.imdecode, YUV formats through the matching
+        COLOR_YUV2BGR_* code."""
         import cv2  # late: optional dependency
 
         w, hgt, fmt = info["width"], info["height"], info["format"]
-        if fmt == 1:
-            return frame.reshape(hgt, w, 3).copy()
-        if fmt == 2:
-            return cv2.cvtColor(frame.reshape(hgt, w, 2), cv2.COLOR_YUV2BGR_YUY2)
-        if fmt == 3:
-            return cv2.cvtColor(
-                frame.reshape(hgt * 3 // 2, w), cv2.COLOR_YUV2BGR_NV12
+        flags = info.get("flags", 1)
+        if not flags & 1:
+            return None
+        expected = self._expected_bytes(w, hgt, fmt)
+        if expected is not None and frame.nbytes < expected:
+            raise ValueError(
+                f"hvcam: short payload {frame.nbytes} < {expected} "
+                f"for {w}x{hgt} fmt={fmt}"
             )
-        if fmt == 4:
-            return cv2.imdecode(frame, cv2.IMREAD_COLOR)
-        if fmt == 5:
-            return cv2.cvtColor(frame.reshape(hgt, w, 4), cv2.COLOR_BGRA2BGR)
-        raise ValueError(f"hvcam: unknown wire format {fmt}")
+        if fmt == 1:
+            img = frame[:expected].reshape(hgt, w, 3).copy()
+        elif fmt == 2:
+            img = cv2.cvtColor(
+                frame[:expected].reshape(hgt, w, 2), cv2.COLOR_YUV2BGR_YUY2
+            )
+        elif fmt == 3:
+            img = cv2.cvtColor(
+                frame[:expected].reshape(hgt * 3 // 2, w),
+                cv2.COLOR_YUV2BGR_NV12,
+            )
+        elif fmt == 4:
+            img = cv2.imdecode(frame, cv2.IMREAD_COLOR)
+            if img is None:
+                raise ValueError("hvcam: MJPEG payload failed to decode")
+            return img
+        else:
+            img = cv2.cvtColor(
+                frame[:expected].reshape(hgt, w, 4), cv2.COLOR_BGRA2BGR
+            )
+        return cv2.flip(img, 0) if flags & 2 else img
 
     def close(self):
         if self.fd >= 0:
@@ -147,3 +184,11 @@ class Camera:
 
     def __exit__(self, *_):
         self.close()
+
+    def __del__(self):
+        # Best-effort: never let a forgotten close() leak the fd
+        # (and the 64 MiB scratch buffer) into GC limbo.
+        try:
+            self.close()
+        except Exception:
+            pass
