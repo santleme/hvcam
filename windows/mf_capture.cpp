@@ -123,12 +123,12 @@ public:
     {
         (void)streamIndex;
         if (FAILED(hrStatus)) {
-            // Erro de leitura: rearma a bomba — um erro transiente
-            // nao pode congelar o stream. Passou de 100 falhas
-            // seguidas, marca terminal (a camera provavelmente morreu).
+            // Read error: re-arm the pump — a transient error must
+            // not freeze the stream. Past 100 consecutive failures,
+            // mark terminal (the camera is probably gone).
             if (++read_errors_ > 100) {
                 if (!ended_.exchange(true))
-                    fprintf(stderr, "hvcam: leituras falhando em sequencia; captura encerrada\n");
+                    fprintf(stderr, "hvcam: consecutive read failures; capture ended\n");
                 return S_OK;
             }
             if (reader_)
@@ -137,7 +137,7 @@ public:
             return S_OK;
         }
         if (streamFlags & MF_SOURCE_READERF_ENDOFSTREAM) {
-            fprintf(stderr, "hvcam: fluxo da camera encerrou\n");
+            fprintf(stderr, "hvcam: camera stream ended\n");
             ended_.store(true);
             return S_OK;
         }
@@ -218,9 +218,10 @@ struct MfCapture::Impl {
     void close_all()
     {
         if (reader) {
-            // Flush drena leituras async em voo: o MF completa os
-            // OnReadSample pendentes antes de soltarmos o reader e
-            // o callback — nada fica apontando pra memoria morta.
+            // Flush drains in-flight async reads: MF completes the
+            // pending OnReadSample callbacks before we release the
+            // reader and the callback — nothing is left pointing at
+            // dead memory.
             reader->Flush((DWORD)MF_SOURCE_READER_ALL_STREAMS);
             reader->Release();
             reader = nullptr;
@@ -298,12 +299,12 @@ void MfCapture::open(const MfOpenOptions &opts)
     attrs->Release();
     if (!n) {
         CoTaskMemFree(acts);
-        throw std::runtime_error("nenhuma camera UVC encontrada");
+        throw std::runtime_error("no UVC camera found");
     }
     if (opts.device_index < 0 || opts.device_index >= (int)n) {
         for (UINT32 i = 0; i < n; i++) acts[i]->Release();
         CoTaskMemFree(acts);
-        throw std::runtime_error("indice de camera fora do intervalo");
+        throw std::runtime_error("camera index out of range");
     }
     check_hr(acts[opts.device_index]->ActivateObject(
                IID_IMFMediaSource, (void **)&p_->source),
@@ -327,7 +328,7 @@ void MfCapture::open(const MfOpenOptions &opts)
             if (SUCCEEDED(cc->Get(CameraControl_Exposure, &v, &f)))
                 cc->Set(CameraControl_Exposure, v, CameraControl_Flags_Manual);
             else
-                fprintf(stderr, "hvcam: lock-exposure nao suportado pelo driver\n");
+                fprintf(stderr, "hvcam: lock-exposure unsupported by driver\n");
         }
         if (opts.lock_exposure && pa) {
             long v = 0, f = 0;
@@ -339,10 +340,10 @@ void MfCapture::open(const MfOpenOptions &opts)
             if (SUCCEEDED(cc->Get(CameraControl_Focus, &v, &f)))
                 cc->Set(CameraControl_Focus, v, CameraControl_Flags_Manual);
             else
-                fprintf(stderr, "hvcam: lock-focus nao suportado pelo driver\n");
+                fprintf(stderr, "hvcam: lock-focus unsupported by driver\n");
         }
         if (!cc && (opts.lock_exposure || opts.lock_focus))
-            fprintf(stderr, "hvcam: driver sem IAMCameraControl; locks ignorados\n");
+            fprintf(stderr, "hvcam: driver has no IAMCameraControl; locks ignored\n");
         if (cc) cc->Release();
         if (pa) pa->Release();
     }
@@ -358,9 +359,9 @@ void MfCapture::open(const MfOpenOptions &opts)
     ra->Release();
 
     // --- Negotiate ONCE: pick best native type ----------------------
-    // Subtype nao suportado sai ANTES de pontuar; o primeiro tipo
-    // suportado ja e candidato, entao qualquer score ruim ainda
-    // produz um fallback utilizavel em vez de rejeitar a camera.
+    // Unsupported subtypes leave BEFORE scoring; the first
+    // supported type is already a candidate, so any poor score still
+    // yields a usable fallback instead of rejecting the camera.
     IMFMediaType *best = nullptr;
     int best_score = INT_MIN;
     for (DWORD i = 0;; i++) {
@@ -392,7 +393,7 @@ void MfCapture::open(const MfOpenOptions &opts)
         }
     }
     if (!best)
-        throw std::runtime_error("camera sem tipo nativo utilizavel");
+        throw std::runtime_error("camera has no usable native type");
     check_hr(p_->reader->SetCurrentMediaType(
                (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, best),
              "SetCurrentMediaType");
@@ -403,7 +404,7 @@ void MfCapture::open(const MfOpenOptions &opts)
 void MfCapture::start(FrameSlots *slots)
 {
     if (!p_->reader)
-        throw std::runtime_error("open() antes de start()");
+        throw std::runtime_error("open() must precede start()");
     p_->cb->attach(p_->reader, slots, p_->w, p_->h, p_->fmt);
     check_hr(p_->reader->ReadSample(
                (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0,

@@ -28,16 +28,16 @@ namespace {
 void usage()
 {
     fprintf(stderr,
-        "uso: hvcam-host [opcoes]\n"
-        "  --list                lista cameras UVC e sai\n"
-        "  --device N            indice da camera (padrao 0)\n"
-        "  --port N              porta vsock/tcp (padrao 8765)\n"
-        "  --width N --height N  resolucao pedida (padrao: nativo da camera)\n"
-        "  --fps N               taxa pedida\n"
-        "  --tcp IP[:PORTA]      modo TCP com bind em IP (padrao: vsock)\n"
-        "  --vm-guid GUID        so aceita conexao vsock dessa VM\n"
-        "  --lock-exposure       fixa exposicao atual (manual)\n"
-        "  --lock-focus          fixa foco atual (manual)\n");
+        "usage: hvcam-host [options]\n"
+        "  --list                enumerate UVC cameras and exit\n"
+        "  --device N            camera index (default 0)\n"
+        "  --port N              vsock/tcp port (default 8765)\n"
+        "  --width N --height N  requested resolution (default: camera native)\n"
+        "  --fps N               requested frame rate\n"
+        "  --tcp IP[:PORT]       TCP mode bound to IP (default: vsock)\n"
+        "  --vm-guid GUID        accept vsock only from that VM\n"
+        "  --lock-exposure       pin current exposure (manual)\n"
+        "  --lock-focus          pin current focus (manual)\n");
 }
 
 } // namespace
@@ -55,7 +55,7 @@ int main(int argc, char **argv)
         std::string a = argv[i];
         auto need = [&](const char *name) -> const char * {
             if (i + 1 >= argc) {
-                fprintf(stderr, "hvcam-host: %s precisa de valor\n", name);
+                fprintf(stderr, "hvcam-host: %s requires a value\n", name);
                 exit(2);
             }
             return argv[++i];
@@ -67,8 +67,8 @@ int main(int argc, char **argv)
         else if (a == "--height") opts.height = atoi(need("--height"));
         else if (a == "--fps") opts.fps = atoi(need("--fps"));
         else if (a == "--tcp") {
-            // Aceita "IP" ou "IP:porta" — o sufixo vira `port` e so
-            // o endereco puro chega ao inet_pton.
+            // Accepts "IP" or "IP:port" — the suffix becomes `port`
+            // and only the bare address reaches inet_pton.
             tcp_ip = need("--tcp");
             size_t colon = tcp_ip.rfind(':');
             if (colon != std::string::npos) {
@@ -78,13 +78,13 @@ int main(int argc, char **argv)
         }
         else if (a == "--vm-guid") {
             std::string g = need("--vm-guid");
-            // O log do accept imprime o VmId sem chaves; CLSIDFromString
-            // so aceita {...} ou ProgID — envolve antes de parsear.
+            // The accept log prints VmId without braces; CLSIDFromString
+            // only takes {...} or ProgID — wrap before parsing.
             if (!g.empty() && g.front() != '{')
                 g = "{" + g + "}";
             std::wstring wg(g.begin(), g.end());
             if (FAILED(CLSIDFromString(wg.c_str(), &allowed_vm))) {
-                fprintf(stderr, "hvcam-host: --vm-guid invalido\n");
+                fprintf(stderr, "hvcam-host: invalid --vm-guid\n");
                 return 2;
             }
             have_vm_guid = true;
@@ -100,7 +100,7 @@ int main(int argc, char **argv)
     if (do_list) {
         auto devs = MfCapture::list_devices();
         if (devs.empty())
-            fprintf(stderr, "nenhuma camera UVC encontrada\n");
+            fprintf(stderr, "no UVC camera found\n");
         for (auto &d : devs)
             fprintf(stderr, "[%d] %ls\n", d.index, d.name.c_str());
         return devs.empty() ? 1 : 0;
@@ -108,7 +108,7 @@ int main(int argc, char **argv)
 
     WSADATA wsa{};
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        fprintf(stderr, "hvcam-host: WSAStartup falhou\n");
+        fprintf(stderr, "hvcam-host: WSAStartup failed\n");
         return 1;
     }
 
@@ -117,7 +117,7 @@ int main(int argc, char **argv)
         MfCapture cam;
         cam.open(opts);
         cam.start(&slots);
-        fprintf(stderr, "hvcam-host: captura ativa %dx%d fmt=%u\n",
+        fprintf(stderr, "hvcam-host: capture active %dx%d fmt=%u\n",
                 cam.width(), cam.height(), cam.format());
         int rc = tcp_ip.empty()
                      ? run_server_vsock(&slots, port,

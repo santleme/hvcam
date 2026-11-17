@@ -31,9 +31,9 @@ static int wait_readable(int fd, int64_t deadline_us)
 {
     struct pollfd pfd = {fd, POLLIN, 0};
     for (;;) {
-        /* Recomputa o restante a cada tentativa — EINTR nao
-         * reinicia o intervalo cheio, senao sinais periodicos
-         * venceriam o deadline indefinidamente. */
+        /* Recompute the remainder every attempt — EINTR must not
+         * restart the full interval, or periodic signals would
+         * postpone the deadline forever. */
         int64_t left = deadline_us - now_us();
         if (left <= 0)
             return -2;
@@ -51,11 +51,11 @@ static int wait_readable(int fd, int64_t deadline_us)
     }
 }
 
-/* deadline_us == INT64_MAX -> bloqueante (modo sem timeout).
- * Retorna -2 so quando NENHUM byte foi consumido nesta chamada:
- * estourar o prazo no meio de uma resposta deixa o stream
- * dessincronizado (o resto do frame seria lido como header na
- * proxima grab) — ai e -1, falha terminal que exige reconectar. */
+/* deadline_us == INT64_MAX -> blocking (no timeout).
+ * Returns -2 only when ZERO bytes were consumed in this call:
+ * hitting the deadline mid-response leaves the stream desynced
+ * (the frame tail would be read as a header on the next grab) —
+ * that is -1, a terminal failure requiring a reconnect. */
 static int read_full(int fd, void *buf, size_t n, int64_t deadline_us)
 {
     uint8_t *p = (uint8_t *)buf;
@@ -75,7 +75,7 @@ static int read_full(int fd, void *buf, size_t n, int64_t deadline_us)
             if (errno == EINTR)
                 continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK)
-                continue; /* deadline ainda vale no proximo poll */
+                continue; /* deadline still applies at the next poll */
             return -1;
         }
         p += r;
@@ -148,8 +148,9 @@ int hvcam_connect_tcp(const char *host, uint16_t port)
 }
 
 /* Reads one frame after sending REQ. Shared by grab/grab_next.
- * deadline_us cobre TUDO: o REQ, o header e o payload inteiro —
- * um peer que trava no meio da resposta nao passa do prazo. */
+ * deadline_us covers EVERYTHING: the REQ, the header and the
+ * whole payload — a peer that stalls mid-response cannot run
+ * past the deadline. */
 static int pull_frame(int fd, HvFrameHeader *hdr, void *payload,
                       uint32_t cap, int64_t deadline_us)
 {
@@ -180,7 +181,7 @@ static int pull_frame(int fd, HvFrameHeader *hdr, void *payload,
             chunk = remaining > sizeof(scratch) ? (uint32_t)sizeof(scratch) : remaining;
         rc = read_full(fd, dst, chunk, deadline_us);
         if (rc == -2)
-            return -1; /* header ja saiu do socket: resposta parcial = desync */
+            return -1; /* header already consumed: partial response = desync */
         if (rc)
             return rc;
         if (dst != scratch)
@@ -198,29 +199,31 @@ int hvcam_grab(int fd, HvFrameHeader *hdr, void *payload, uint32_t cap)
 int hvcam_grab_next(int fd, HvFrameHeader *hdr, void *payload,
                     uint32_t cap, uint64_t *last_seq, int timeout_ms)
 {
-    /* Um unico prazo cobre todo o wait: REQ, headers e payloads.
-     * Resposta placeholder (flags bit0=0) ou seq repetida nao conta
-     * como frame novo — espera ate o prazo.
+    /* A single deadline covers the whole wait: REQ, headers,
+     * payloads. A placeholder reply (flags bit0=0) or a repeated
+     * seq does not count as a new frame — wait until the deadline.
      *
-     * -2 so sai com a conexao consistente: deadline verificado ANTES
-     * de enviar cada REQ. Estourar o prazo com um REQ ja no fio
-     * deixa uma resposta a dever — a proxima grab leria a resposta
-     * atrasada como se fosse a nova — entao vira -1 (reconectar). */
+     * -2 is only returned with a consistent connection: the deadline
+     * is checked BEFORE each REQ goes out. Timing out with a REQ
+     * already on the wire leaves a reply owed — the next grab would
+     * read that late reply as if it were new — so that is -1
+     * (reconnect required). */
     int64_t deadline_us = now_us() + (int64_t)timeout_ms * 1000;
     for (;;) {
         if (now_us() >= deadline_us)
             return -2;
         int n = pull_frame(fd, hdr, payload, cap, deadline_us);
         if (n == -2)
-            return -1; /* REQ sem resposta: uma resposta ficou devendo */
+            return -1; /* unanswered REQ: a reply is still owed on the wire */
         if (n < 0)
             return n;
         if ((hdr->flags & 1) && hdr->seq_num != *last_seq) {
             *last_seq = hdr->seq_num;
             return n;
         }
-        /* Respiro entre REQs: dorme ~15ms clampado ao deadline e
-         * detecta queda do peer de graca (POLLHUP sai cedo). */
+        /* Breather between REQs: sleep ~15 ms clamped to the
+         * deadline; also detects peer drop for free (POLLHUP wakes
+         * it early). */
         int64_t nap_end = now_us() + 15000;
         if (nap_end > deadline_us)
             nap_end = deadline_us;

@@ -16,7 +16,7 @@ class FrameSlots;
 
 // Runs the accept loop forever (until process signal).
 // vsock port is the hvsocket service port; tcp_ip empty = vsock mode.
-// allowed_vm != nullptr trava o accept naquela unica particao.
+// allowed_vm != nullptr locks accept to that one partition.
 int run_server_vsock(FrameSlots *slots, uint32_t port,
                      const GUID *allowed_vm);
 int run_server_tcp(FrameSlots *slots, const char *bind_ip, uint16_t port);

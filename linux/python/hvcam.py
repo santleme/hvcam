@@ -48,7 +48,7 @@ def _load():
         except OSError:
             continue
     else:
-        raise OSError("libhvcam.so nao encontrada (LD_LIBRARY_PATH)")
+        raise OSError("libhvcam.so not found (LD_LIBRARY_PATH)")
     lib.hvcam_connect.argtypes = [ctypes.c_uint32]
     lib.hvcam_connect.restype = ctypes.c_int
     lib.hvcam_connect_tcp.argtypes = [ctypes.c_char_p, ctypes.c_uint16]
@@ -82,7 +82,7 @@ class Camera:
         else:
             self.fd = _LIB.hvcam_connect(port)
         if self.fd < 0:
-            raise OSError(f"hvcam: conexao falhou ({self.fd})")
+            raise OSError(f"hvcam: connect failed ({self.fd})")
         self._buf = (ctypes.c_ubyte * _MAX_PAYLOAD)()
         self._hdr = HvFrameHeader()
         self._last = ctypes.c_uint64(0xFFFFFFFFFFFFFFFF)
@@ -99,10 +99,10 @@ class Camera:
         if n == -2:
             raise TimeoutError("hvcam: nenhum frame novo")
         if n < 0:
-            raise OSError("hvcam: stream caiu")
+            raise OSError("hvcam: stream dropped")
         h = self._hdr
-        # View real sobre o buffer persistente — sobrescrita no
-        # proximo grab(); .copy() se precisar guardar o frame.
+        # Real view over the persistent buffer — overwritten by the
+        # next grab(); .copy() if you need to keep the frame.
         arr = np.frombuffer(self._buf, dtype=np.uint8, count=n)
         info = {
             "seq": h.seq_num,

@@ -36,7 +36,7 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[i], "-t") && i + 1 < argc) {
             max_seconds = atof(argv[++i]);
         } else {
-            fprintf(stderr, "uso: hvcam-dump [--tcp host[:porta]] [-p porta] [-n frames] [-t segundos]\n");
+            fprintf(stderr, "usage: hvcam-dump [--tcp host[:port]] [-p port] [-n frames] [-t seconds]\n");
             return 2;
         }
     }
@@ -55,7 +55,7 @@ int main(int argc, char **argv)
         fd = hvcam_connect(port);
     }
     if (fd < 0) {
-        fprintf(stderr, "hvcam-dump: conexao falhou (%d)\n", fd);
+        fprintf(stderr, "hvcam-dump: connect failed (%d)\n", fd);
         return 1;
     }
 
@@ -77,14 +77,14 @@ int main(int argc, char **argv)
         if (n == -2)
             continue;
         if (n < 0) {
-            fprintf(stderr, "hvcam-dump: stream caiu\n");
+            fprintf(stderr, "hvcam-dump: stream dropped\n");
             free(buf);
             hvcam_close(fd);
             return 1;
         }
         uint64_t arrival = now_us();
-        /* timestamp_us do host e o relogio local nao dividem origem;
-         * a metrica honesta e o intervalo local entre chegadas. */
+        /* host timestamp_us and the local clock share no origin;
+         * the honest metric is the local arrival-to-arrival gap. */
         long gap = last_arrival ? (long)(arrival - last_arrival) : 0;
         last_arrival = arrival;
         fresh++;
