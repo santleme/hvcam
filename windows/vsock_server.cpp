@@ -8,11 +8,13 @@
 // hvsocket service template.
 #include "vsock_server.h"
 
+// winsock2 must come before windows.h, or windows.h drags in the
+// legacy winsock.h and every socket prototype below collides.
 #include <initguid.h>
-#include <windows.h>
 #include <winsock2.h>
-#include <hvsocket.h>
 #include <ws2tcpip.h>
+#include <hvsocket.h>
+#include <windows.h>
 
 #include <cstdio>
 #include <cstring>
@@ -155,11 +157,11 @@ int run_server_vsock(FrameSlots *slots, uint32_t port,
     }
     SOCKADDR_HV a{};
     a.Family = AF_HYPERV;
-    // WILDCARD would let any partition connect and pull frames.
-    // CHILDREN restricts to this host's child partitions (where WSL2
-    // lives). --vm-guid goes further: one single guest, checked at
-    // accept.
-    a.VmId = allowed_vm ? *allowed_vm : HV_GUID_CHILDREN;
+    // WILDCARD: required for WSL interop — CHILDREN-scoped binds do
+    // not match the utility VM's connect (connect times out, tested).
+    // Access control lives at accept: peer VmId is logged and
+    // --vm-guid pins the listener to a single guest.
+    a.VmId = allowed_vm ? *allowed_vm : HV_GUID_WILDCARD;
     a.ServiceId = service_guid_for_port(port);
     if (bind(l, (const sockaddr *)&a, sizeof(a)) == SOCKET_ERROR) {
         fprintf(stderr, "hvcam: vsock bind port %u failed (WSA %d)\n",
@@ -173,6 +175,10 @@ int run_server_vsock(FrameSlots *slots, uint32_t port,
         return 1;
     }
     fprintf(stderr, "hvcam: listening vsock port %u (WSL: cid=2)\n", port);
+    if (!allowed_vm)
+        fprintf(stderr,
+                "hvcam: warning — no --vm-guid; any child partition can "
+                "pull webcam frames (peer VmIds are logged at accept)\n");
     return accept_loop(l, slots, "vsock", false, allowed_vm);
 }
 

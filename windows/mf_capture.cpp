@@ -122,6 +122,11 @@ public:
         IMFSample *sample) override
     {
         (void)streamIndex;
+        // Shutdown gate: close_all() flips active_ off before
+        // flushing/releasing the reader, so a late in-flight callback
+        // never re-arms a released reader or touches slots_ again.
+        if (!active_.load())
+            return S_OK;
         if (FAILED(hrStatus)) {
             // Read error: re-arm the pump — a transient error must
             // not freeze the stream. Past 100 consecutive failures,
@@ -148,23 +153,25 @@ public:
             if (SUCCEEDED(hr) && buf) {
                 BYTE *data = nullptr;
                 DWORD len = 0;
-                if (SUCCEEDED(buf->Lock(&data, nullptr, &len)) && data && len) {
-                    HvSlot *slot = slots_->acquire_write();
-                    if (slot) {
-                        slot->bytes.assign(data, data + len);
-                        slot->w = (uint16_t)w_;
-                        slot->h = (uint16_t)h_;
-                        slot->format = fmt_;
-                        slot->seq = seq_++;
-                        // Relogio unico: QPC na chegada, sempre.
-                        // Split div/mul evita overflow do *1e6 a 10MHz.
-                        LARGE_INTEGER qpc;
-                        QueryPerformanceCounter(&qpc);
-                        uint64_t q = (uint64_t)qpc.QuadPart;
-                        uint64_t f = (uint64_t)qpc_freq_.QuadPart;
-                        slot->ts_us = (q / f) * 1000000ull +
-                                      (q % f) * 1000000ull / f;
-                        slots_->publish_write(slot);
+                if (SUCCEEDED(buf->Lock(&data, nullptr, &len))) {
+                    if (data && len) {
+                        HvSlot *slot = slots_->acquire_write();
+                        if (slot) {
+                            slot->bytes.assign(data, data + len);
+                            slot->w = (uint16_t)w_;
+                            slot->h = (uint16_t)h_;
+                            slot->format = fmt_;
+                            slot->seq = seq_++;
+                            // Relogio unico: QPC na chegada, sempre.
+                            // Split div/mul evita overflow do *1e6 a 10MHz.
+                            LARGE_INTEGER qpc;
+                            QueryPerformanceCounter(&qpc);
+                            uint64_t q = (uint64_t)qpc.QuadPart;
+                            uint64_t f = (uint64_t)qpc_freq_.QuadPart;
+                            slot->ts_us = (q / f) * 1000000ull +
+                                          (q % f) * 1000000ull / f;
+                            slots_->publish_write(slot);
+                        }
                     }
                     buf->Unlock();
                 }
@@ -186,6 +193,7 @@ public:
     HRESULT STDMETHODCALLTYPE OnFlush(DWORD) override { return S_OK; }
 
     bool ended() const { return ended_.load(); }
+    void shutdown() { active_.store(false); }
 
 private:
     std::atomic<ULONG> ref_;
@@ -196,6 +204,7 @@ private:
     uint64_t seq_ = 0;
     std::atomic<int> read_errors_{0};
     std::atomic<bool> ended_{false};
+    std::atomic<bool> active_{true};
     LARGE_INTEGER qpc_freq_{ []() {
         LARGE_INTEGER f;
         QueryPerformanceFrequency(&f);
@@ -217,6 +226,12 @@ struct MfCapture::Impl {
 
     void close_all()
     {
+        // Gate first: any callback still queued on an MF worker thread
+        // sees active_ == false and returns before re-arming or
+        // writing into the slots. Flush then drains what was already
+        // in flight before the reader/callback are released.
+        if (cb)
+            cb->shutdown();
         if (reader) {
             // Flush drains in-flight async reads: MF completes the
             // pending OnReadSample callbacks before we release the
@@ -253,8 +268,10 @@ std::vector<MfCameraInfo> MfCapture::list_devices()
         return out;
 
     IMFAttributes *attrs = nullptr;
-    if (FAILED(MFCreateAttributes(&attrs, 1)))
+    if (FAILED(MFCreateAttributes(&attrs, 1))) {
+        MFShutdown();
         return out;
+    }
     attrs->SetGUID(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
                    MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID);
     IMFActivate **acts = nullptr;
@@ -309,9 +326,10 @@ void MfCapture::open(const MfOpenOptions &opts)
     check_hr(acts[opts.device_index]->ActivateObject(
                IID_IMFMediaSource, (void **)&p_->source),
            "ActivateObject(IMFMediaSource)");
+    // ActivateObject AddRefs the source; every IMFActivate is still
+    // ours to release — including the selected one.
     for (UINT32 i = 0; i < n; i++)
-        if ((int)i != opts.device_index)
-            acts[i]->Release();
+        acts[i]->Release();
     CoTaskMemFree(acts);
 
     // --- Optional camera locks: exposure / focus --------------------
@@ -372,13 +390,17 @@ void MfCapture::open(const MfOpenOptions &opts)
             break;
         GUID sub = GUID_NULL;
         UINT32 w = 0, h = 0, fn = 0, fd = 0;
-        mt->GetGUID(MF_MT_SUBTYPE, &sub);
-        if (!subtype_to_fmt(sub)) {
+        if (FAILED(mt->GetGUID(MF_MT_SUBTYPE, &sub)) ||
+            !subtype_to_fmt(sub) ||
+            FAILED(MFGetAttributeSize(mt, MF_MT_FRAME_SIZE, &w, &h)) ||
+            !w || !h) {
+            // Malformed type (missing subtype/frame size): skip
+            // rather than score a zero-sized candidate.
             mt->Release();
             continue;
         }
-        MFGetAttributeSize(mt, MF_MT_FRAME_SIZE, &w, &h);
-        MFGetAttributeRatio(mt, MF_MT_FRAME_RATE, &fn, &fd);
+        if (FAILED(MFGetAttributeRatio(mt, MF_MT_FRAME_RATE, &fn, &fd)))
+            fn = fd = 0; // frame rate optional for scoring
         int sc = score_type(sub, w, h, fn, fd, opts);
         if (sc > best_score) {
             if (best) best->Release();

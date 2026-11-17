@@ -2,14 +2,13 @@
 
     import hvcam
     cam = hvcam.Camera()                    # vsock, port 8765
-    hdr, frame = cam.grab()                 # newest frame, blocking
-    # frame is a numpy view over the raw payload; convert with cv2:
-    #   yuy2 -> cv2.cvtColor(frame.reshape(h, w, 2), cv2.COLOR_YUV2BGR_YUY2)
-    #   nv12 -> cv2.cvtColor(frame.reshape(h * 3 // 2, w), cv2.COLOR_YUV2BGR_NV12)
+    info, frame = cam.grab()                # newest frame, blocking
+    bgr = cam.to_bgr(info, frame)           # cv2 conversion, or None
     cam.close()
 
 Needs libhvcam.so on LD_LIBRARY_PATH (or hvcam.build it next to this
-file) and numpy. No cv2 hard dependency — the raw arrays are yours.
+file) and numpy. cv2 is optional — only to_bgr() imports it; grab()
+hands you the raw wire payload either way.
 """
 
 import ctypes
@@ -97,7 +96,7 @@ class Camera:
             _MAX_PAYLOAD, ctypes.byref(self._last), timeout_ms,
         )
         if n == -2:
-            raise TimeoutError("hvcam: nenhum frame novo")
+            raise TimeoutError("hvcam: no new frame")
         if n < 0:
             raise OSError("hvcam: stream dropped")
         h = self._hdr
@@ -107,12 +106,78 @@ class Camera:
         info = {
             "seq": h.seq_num,
             "ts_us": h.timestamp_us,
+            "flags": h.flags,
             "width": h.width,
             "height": h.height,
             "format": h.format,
             "payload": n,
         }
         return info, arr
+
+    @staticmethod
+    def _expected_bytes(w, h, fmt):
+        """Bytes the wire payload must hold for w x h in `fmt`;
+        None for MJPEG (opaque blob). Unknown fmt -> ValueError."""
+        if fmt == 1:
+            return w * h * 3
+        if fmt == 2:
+            return w * h * 2
+        if fmt == 3:
+            return (h * 3 // 2) * w
+        if fmt == 4:
+            return None
+        if fmt == 5:
+            return w * h * 4
+        raise ValueError(f"hvcam: unknown wire format {fmt}")
+
+    def to_bgr(self, info, frame):
+        """Converts a grabbed payload to BGR via cv2.cvtColor.
+
+        Wire formats (protocol.h): 1=BGR24 2=YUY2 3=NV12 4=MJPEG
+        5=BGRX32. Returns an (h, w, 3) uint8 array, or None for a
+        placeholder reply (flags bit0 clear). flags bit1
+        (bottom-up rows) flips the raster formats at the end.
+        Never slices channels by hand — MJPEG goes through
+        cv2.imdecode, YUV formats through the matching
+        COLOR_YUV2BGR_* code."""
+        import cv2  # late: optional dependency
+
+        w, hgt, fmt = info["width"], info["height"], info["format"]
+        flags = info.get("flags", 1)
+        if not flags & 1:
+            return None
+        expected = self._expected_bytes(w, hgt, fmt)
+        # Exact match, not just "big enough": if a row-padded buffer
+        # leaked onto the wire, slicing to `expected` would read the
+        # interleaved padding as pixels and silently corrupt the
+        # image. The wire format has no stride field — reject until
+        # the host repacks tightly (or carries the stride).
+        if expected is not None and frame.nbytes != expected:
+            raise ValueError(
+                f"hvcam: payload {frame.nbytes}B != {expected}B for "
+                f"{w}x{hgt} fmt={fmt} (unpacked stride not supported)"
+            )
+        if fmt == 1:
+            img = frame.reshape(hgt, w, 3).copy()
+        elif fmt == 2:
+            img = cv2.cvtColor(
+                frame.reshape(hgt, w, 2), cv2.COLOR_YUV2BGR_YUY2
+            )
+        elif fmt == 3:
+            img = cv2.cvtColor(
+                frame.reshape(hgt * 3 // 2, w),
+                cv2.COLOR_YUV2BGR_NV12,
+            )
+        elif fmt == 4:
+            img = cv2.imdecode(frame, cv2.IMREAD_COLOR)
+            if img is None:
+                raise ValueError("hvcam: MJPEG payload failed to decode")
+            return img
+        else:
+            img = cv2.cvtColor(
+                frame.reshape(hgt, w, 4), cv2.COLOR_BGRA2BGR
+            )
+        return cv2.flip(img, 0) if flags & 2 else img
 
     def close(self):
         if self.fd >= 0:
@@ -124,3 +189,11 @@ class Camera:
 
     def __exit__(self, *_):
         self.close()
+
+    def __del__(self):
+        # Best-effort: never let a forgotten close() leak the fd
+        # (and the 64 MiB scratch buffer) into GC limbo.
+        try:
+            self.close()
+        except Exception:
+            pass
