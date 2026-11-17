@@ -2,14 +2,13 @@
 
     import hvcam
     cam = hvcam.Camera()                    # vsock, port 8765
-    hdr, frame = cam.grab()                 # newest frame, blocking
-    # frame is a numpy view over the raw payload; convert with cv2:
-    #   yuy2 -> cv2.cvtColor(frame.reshape(h, w, 2), cv2.COLOR_YUV2BGR_YUY2)
-    #   nv12 -> cv2.cvtColor(frame.reshape(h * 3 // 2, w), cv2.COLOR_YUV2BGR_NV12)
+    info, frame = cam.grab()                # newest frame, blocking
+    bgr = cam.to_bgr(info, frame)           # cv2 conversion, or None
     cam.close()
 
 Needs libhvcam.so on LD_LIBRARY_PATH (or hvcam.build it next to this
-file) and numpy. No cv2 hard dependency — the raw arrays are yours.
+file) and numpy. cv2 is optional — only to_bgr() imports it; grab()
+hands you the raw wire payload either way.
 """
 
 import ctypes
@@ -97,7 +96,7 @@ class Camera:
             _MAX_PAYLOAD, ctypes.byref(self._last), timeout_ms,
         )
         if n == -2:
-            raise TimeoutError("hvcam: nenhum frame novo")
+            raise TimeoutError("hvcam: no new frame")
         if n < 0:
             raise OSError("hvcam: stream dropped")
         h = self._hdr
@@ -113,6 +112,30 @@ class Camera:
             "payload": n,
         }
         return info, arr
+
+    def to_bgr(self, info, frame):
+        """Converts a grabbed payload to BGR via cv2.cvtColor.
+
+        Wire formats (protocol.h): 1=BGR24 2=YUY2 3=NV12 4=MJPEG
+        5=BGRX32. Returns an (h, w, 3) uint8 array. Never slices
+        channels by hand — MJPEG goes through cv2.imdecode, YUV
+        formats through the matching COLOR_YUV2BGR_* code."""
+        import cv2  # late: optional dependency
+
+        w, hgt, fmt = info["width"], info["height"], info["format"]
+        if fmt == 1:
+            return frame.reshape(hgt, w, 3).copy()
+        if fmt == 2:
+            return cv2.cvtColor(frame.reshape(hgt, w, 2), cv2.COLOR_YUV2BGR_YUY2)
+        if fmt == 3:
+            return cv2.cvtColor(
+                frame.reshape(hgt * 3 // 2, w), cv2.COLOR_YUV2BGR_NV12
+            )
+        if fmt == 4:
+            return cv2.imdecode(frame, cv2.IMREAD_COLOR)
+        if fmt == 5:
+            return cv2.cvtColor(frame.reshape(hgt, w, 4), cv2.COLOR_BGRA2BGR)
+        raise ValueError(f"hvcam: unknown wire format {fmt}")
 
     def close(self):
         if self.fd >= 0:

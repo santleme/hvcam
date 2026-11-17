@@ -46,16 +46,21 @@ Linux client (WSL2):
     hvcam-dump --tcp 127.0.0.1:8765       # TCP fallback
 
 ```python
-import hvcam                       # linux/python/hvcam.py
+import hvcam                       # bindings/python/hvcam.py
 cam = hvcam.Camera()               # vsock :8765
-info, raw = cam.grab()             # newest frame as np.ndarray
+info, raw = cam.grab()             # newest frame, np view (zero-copy)
+bgr = cam.to_bgr(info, raw)        # optional cv2 conversion
 ```
 
 ## Status
 
 Validated on hardware (2026-11-17, Windows 11 + WSL2 + USB UVC camera): MSVC build of `hvcam-host` compiles clean, `--list` enumerates devices, and the full path — Media Foundation capture → triple-buffer → wire protocol → `libhvcam` → `hvcam-dump` — delivers real frames over the TCP fallback (1920×1080 YUY2 native mode, ~5 fps camera-limited).
 
-**vsock caveat:** on the test machine (recent Windows 11 build + WSL2), `connect(VMADDR_CID_HOST)` from the guest times out on every port — listener or not — so the guest→host Hyper-V socket channel appears dead at the transport level on that setup. The host-side `AF_HYPERV` bind follows the documented pattern (`HV_GUID_WILDCARD` + `{port}-facb-11e6-bd58-64006a7986d3` service template); if your WSL build exposes working vsock, it should be a drop-in. The TCP path is the verified one today.
+**vsock note (guest→host needs one-time registration):** Windows drops guest→host `AF_VSOCK` SYNs at the Hyper-V kernel until the service GUID `{<port-hex>-facb-11e6-bd58-64006a7986d3}` exists under `HKLM\...\Virtualization\GuestCommunicationServices`. Run once as Administrator:
+
+    hvcam-host --register-vsock --port 8766
+
+(`--unregister-vsock` removes it.) Without the key, `bind`/`listen` succeed silently but `connect(VMADDR_CID_HOST)` from the guest times out on every port — exactly the failure mode observed before registering. The TCP path needs no registration and is the verified fallback.
 
 ## License
 
