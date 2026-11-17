@@ -8,6 +8,8 @@
 //   hvcam-host --tcp 127.0.0.1:8765     # TCP fallback (no vsock)
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
+#include <objbase.h>
 #include <stdexcept>
 #include <string>
 #include <winsock2.h>
@@ -19,6 +21,7 @@
 #include "protocol.h"
 
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "ole32.lib") // CLSIDFromString (--vm-guid)
 
 namespace {
 
@@ -31,7 +34,8 @@ void usage()
         "  --port N              porta vsock/tcp (padrao 8765)\n"
         "  --width N --height N  resolucao pedida (padrao: nativo da camera)\n"
         "  --fps N               taxa pedida\n"
-        "  --tcp IP              modo TCP com bind em IP (padrao: vsock)\n"
+        "  --tcp IP[:PORTA]      modo TCP com bind em IP (padrao: vsock)\n"
+        "  --vm-guid GUID        so aceita conexao vsock dessa VM\n"
         "  --lock-exposure       fixa exposicao atual (manual)\n"
         "  --lock-focus          fixa foco atual (manual)\n");
 }
@@ -43,6 +47,8 @@ int main(int argc, char **argv)
     MfOpenOptions opts;
     uint32_t port = 8765;
     std::string tcp_ip;
+    GUID allowed_vm{};
+    bool have_vm_guid = false;
     bool do_list = false;
 
     for (int i = 1; i < argc; i++) {
@@ -60,7 +66,25 @@ int main(int argc, char **argv)
         else if (a == "--width") opts.width = atoi(need("--width"));
         else if (a == "--height") opts.height = atoi(need("--height"));
         else if (a == "--fps") opts.fps = atoi(need("--fps"));
-        else if (a == "--tcp") tcp_ip = need("--tcp");
+        else if (a == "--tcp") {
+            // Aceita "IP" ou "IP:porta" — o sufixo vira `port` e so
+            // o endereco puro chega ao inet_pton.
+            tcp_ip = need("--tcp");
+            size_t colon = tcp_ip.rfind(':');
+            if (colon != std::string::npos) {
+                port = (uint32_t)atoi(tcp_ip.c_str() + colon + 1);
+                tcp_ip.resize(colon);
+            }
+        }
+        else if (a == "--vm-guid") {
+            std::string g = need("--vm-guid");
+            std::wstring wg(g.begin(), g.end());
+            if (FAILED(CLSIDFromString(wg.c_str(), &allowed_vm))) {
+                fprintf(stderr, "hvcam-host: --vm-guid invalido\n");
+                return 2;
+            }
+            have_vm_guid = true;
+        }
         else if (a == "--lock-exposure") opts.lock_exposure = true;
         else if (a == "--lock-focus") opts.lock_focus = true;
         else {
@@ -92,7 +116,8 @@ int main(int argc, char **argv)
         fprintf(stderr, "hvcam-host: captura ativa %dx%d fmt=%u\n",
                 cam.width(), cam.height(), cam.format());
         int rc = tcp_ip.empty()
-                     ? run_server_vsock(&slots, port)
+                     ? run_server_vsock(&slots, port,
+                                        have_vm_guid ? &allowed_vm : nullptr)
                      : run_server_tcp(&slots, tcp_ip.c_str(), (uint16_t)port);
         cam.close();
         WSACleanup();

@@ -68,7 +68,7 @@ int main(int argc, char **argv)
     HvFrameHeader hdr;
     uint64_t last_seq = UINT64_MAX;
     uint64_t t0 = now_us();
-    uint64_t first_ts = 0;
+    uint64_t last_arrival = 0;
     int fresh = 0;
 
     while ((now_us() - t0) < (uint64_t)(max_seconds * 1e6)) {
@@ -82,13 +82,15 @@ int main(int argc, char **argv)
             hvcam_close(fd);
             return 1;
         }
-        if (first_ts == 0)
-            first_ts = hdr.timestamp_us;
+        uint64_t arrival = now_us();
+        /* timestamp_us do host e o relogio local nao dividem origem;
+         * a metrica honesta e o intervalo local entre chegadas. */
+        long gap = last_arrival ? (long)(arrival - last_arrival) : 0;
+        last_arrival = arrival;
         fresh++;
-        printf("seq=%llu %ux%u %s payload=%dB age=%ldus\n",
+        printf("seq=%llu %ux%u %s payload=%dB gap=%ldus\n",
                (unsigned long long)hdr.seq_num, hdr.width, hdr.height,
-               hvcam_format_name(hdr.format), n,
-               (long)(now_us() - hdr.timestamp_us));
+               hvcam_format_name(hdr.format), n, gap);
         if (max_frames && fresh >= max_frames)
             break;
     }

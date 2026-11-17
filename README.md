@@ -19,7 +19,7 @@ The WSL2 guest connects to the host on `VMADDR_CID_HOST` (cid 2) and a fixed por
 1. **Transport** — `AF_HYPERV`/`AF_VSOCK` over VMBus, service GUID derived from the port (`{port}-facb-11e6-bd58-64006a7986d3`). Optional `--tcp` fallback for development and non-WSL guests.
 2. **Capture** — `IMFSourceReader` with an async callback on an MF worker thread; `GetNativeMediaType`/`SetCurrentMediaType` happens before the pump starts. Optional `--lock-exposure` / `--lock-focus` via `IAMCameraControl`.
 3. **Exchange** — three-slot "always newest" buffer: the capture callback and the send loop never block each other.
-4. **Wire format** — one REQ byte per pull, then a fixed 36-byte `HvFrameHeader` + payload (YUY2, NV12, BGR24, or camera-native MJPEG). See `include/protocol.h`.
+4. **Wire format** — one REQ byte per pull, then a fixed 36-byte `HvFrameHeader` + payload (YUY2, NV12, BGR24, BGRX32, or camera-native MJPEG). See `include/protocol.h`. The host binds `HV_GUID_CHILDREN`, so only child partitions of this machine can connect (the WSL2 VM); `--vm-guid <GUID>` pins the listener to one specific VM. Every accepted vsock peer GUID is logged.
 
 ## Build
 
@@ -38,6 +38,8 @@ Linux client (WSL2):
     # Windows
     hvcam-host --list                     # enumerate UVC cameras
     hvcam-host --device 0 --width 1280 --height 720 --lock-focus
+    hvcam-host --tcp 127.0.0.1:8765     # TCP fallback (IP[:port])
+    hvcam-host --vm-guid <guid>         # accept only that guest VM
 
     # WSL2
     ./build/hvcam-dump                    # print seq/ts/fps for ~5 s
@@ -51,7 +53,7 @@ info, raw = cam.grab()             # newest frame as np.ndarray
 
 ## Status
 
-Linux client builds clean (gcc 13) and passes a full loopback test of the wire protocol. The Windows host compiles against documented APIs but has **not been validated on hardware yet** — first hardware run checklist: `--list`, negotiated-format log, `hvcam-dump` fps/age, and the `--lock-*` controls on a real UVC driver.
+Linux client builds clean (gcc 13) and passes a full loopback test of the wire protocol. The Windows host compiles against documented APIs but has **not been validated on hardware yet** — first hardware run checklist: `--list`, negotiated-format log, `hvcam-dump` fps/arrival-gap, and the `--lock-*` controls on a real UVC driver.
 
 ## License
 
