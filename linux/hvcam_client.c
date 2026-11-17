@@ -200,21 +200,31 @@ int hvcam_grab_next(int fd, HvFrameHeader *hdr, void *payload,
 {
     /* Um unico prazo cobre todo o wait: REQ, headers e payloads.
      * Resposta placeholder (flags bit0=0) ou seq repetida nao conta
-     * como frame novo — espera ate o prazo. */
+     * como frame novo — espera ate o prazo.
+     *
+     * -2 so sai com a conexao consistente: deadline verificado ANTES
+     * de enviar cada REQ. Estourar o prazo com um REQ ja no fio
+     * deixa uma resposta a dever — a proxima grab leria a resposta
+     * atrasada como se fosse a nova — entao vira -1 (reconectar). */
     int64_t deadline_us = now_us() + (int64_t)timeout_ms * 1000;
     for (;;) {
+        if (now_us() >= deadline_us)
+            return -2;
         int n = pull_frame(fd, hdr, payload, cap, deadline_us);
+        if (n == -2)
+            return -1; /* REQ sem resposta: uma resposta ficou devendo */
         if (n < 0)
             return n;
         if ((hdr->flags & 1) && hdr->seq_num != *last_seq) {
             *last_seq = hdr->seq_num;
             return n;
         }
-        if (now_us() >= deadline_us)
-            return -2;
-        /* Respiro entre REQs: dorme ~15ms e detecta queda do peer
-         * de graca (wait_readable sai cedo em POLLHUP). */
-        int w = wait_readable(fd, now_us() + 15000);
+        /* Respiro entre REQs: dorme ~15ms clampado ao deadline e
+         * detecta queda do peer de graca (POLLHUP sai cedo). */
+        int64_t nap_end = now_us() + 15000;
+        if (nap_end > deadline_us)
+            nap_end = deadline_us;
+        int w = wait_readable(fd, nap_end);
         if (w == -1)
             return -1;
     }

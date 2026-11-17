@@ -36,11 +36,11 @@ int hvcam_grab(int fd, HvFrameHeader *hdr, void *payload, uint32_t cap);
  * `*last_seq` (pass UINT64_MAX initially). Same return contract as
  * hvcam_grab; returns -2 on timeout (distinct from -1 transport).
  *
- * Note on timeouts: -2 means the deadline passed before ANY byte of
- * the response was consumed — safe to retry on the same connection.
- * If a deadline expires mid-response (partial header or payload),
- * the stream position is unrecoverable and this returns -1 instead;
- * the caller must close and reconnect. */
+ * Note on timeouts: -2 means the deadline passed with NO request
+ * outstanding — the connection stays consistent and retrying is
+ * safe. If a deadline expires after a REQ was sent (the host still
+ * owes that reply), or mid-response, the stream position is
+ * unrecoverable and this returns -1; close and reconnect. */
 int hvcam_grab_next(int fd, HvFrameHeader *hdr, void *payload,
                     uint32_t cap, uint64_t *last_seq, int timeout_ms);
 
