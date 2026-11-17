@@ -6,14 +6,18 @@
 //   hvcam-host --device 1 --width 1280 --height 720 --fps 30
 //   hvcam-host --lock-exposure --lock-focus
 //   hvcam-host --tcp 127.0.0.1:8765     # TCP fallback (no vsock)
+// winsock2 must precede every header that pulls windows.h (objbase.h
+// included), or the legacy winsock.h is dragged in and collides.
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <objbase.h>
+
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
-#include <objbase.h>
 #include <stdexcept>
 #include <string>
-#include <winsock2.h>
-#include <windows.h>
 
 #include "frame_slots.h"
 #include "mf_capture.h"

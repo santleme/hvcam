@@ -19,7 +19,7 @@ The WSL2 guest connects to the host on `VMADDR_CID_HOST` (cid 2) and a fixed por
 1. **Transport** — `AF_HYPERV`/`AF_VSOCK` over VMBus, service GUID derived from the port (`{port}-facb-11e6-bd58-64006a7986d3`). Optional `--tcp` fallback for development and non-WSL guests.
 2. **Capture** — `IMFSourceReader` with an async callback on an MF worker thread; `GetNativeMediaType`/`SetCurrentMediaType` happens before the pump starts. Optional `--lock-exposure` / `--lock-focus` via `IAMCameraControl`.
 3. **Exchange** — three-slot "always newest" buffer: the capture callback and the send loop never block each other.
-4. **Wire format** — one REQ byte per pull, then a fixed 36-byte `HvFrameHeader` + payload (YUY2, NV12, BGR24, BGRX32, or camera-native MJPEG). See `include/protocol.h`. The host binds `HV_GUID_CHILDREN`, so only child partitions of this machine can connect (the WSL2 VM); `--vm-guid <GUID>` pins the listener to one specific VM. Every accepted vsock peer GUID is logged.
+4. **Wire format** — one REQ byte per pull, then a fixed 36-byte `HvFrameHeader` + payload (YUY2, NV12, BGR24, BGRX32, or camera-native MJPEG). See `include/protocol.h`. The host binds `HV_GUID_WILDCARD` (required for WSL interop — the utility VM does not match a `CHILDREN`-scoped bind), and every accepted vsock peer VmId is logged; `--vm-guid <GUID>` pins the listener to one specific guest VM.
 
 ## Build
 
@@ -53,7 +53,9 @@ info, raw = cam.grab()             # newest frame as np.ndarray
 
 ## Status
 
-Linux client builds clean (gcc 13) and passes a full loopback test of the wire protocol. The Windows host compiles against documented APIs but has **not been validated on hardware yet** — first hardware run checklist: `--list`, negotiated-format log, `hvcam-dump` fps/arrival-gap, and the `--lock-*` controls on a real UVC driver.
+Validated on hardware (2026-11-17, Windows 11 + WSL2 + USB UVC camera): MSVC build of `hvcam-host` compiles clean, `--list` enumerates devices, and the full path — Media Foundation capture → triple-buffer → wire protocol → `libhvcam` → `hvcam-dump` — delivers real frames over the TCP fallback (1920×1080 YUY2 native mode, ~5 fps camera-limited).
+
+**vsock caveat:** on the test machine (recent Windows 11 build + WSL2), `connect(VMADDR_CID_HOST)` from the guest times out on every port — listener or not — so the guest→host Hyper-V socket channel appears dead at the transport level on that setup. The host-side `AF_HYPERV` bind follows the documented pattern (`HV_GUID_WILDCARD` + `{port}-facb-11e6-bd58-64006a7986d3` service template); if your WSL build exposes working vsock, it should be a drop-in. The TCP path is the verified one today.
 
 ## License
 
