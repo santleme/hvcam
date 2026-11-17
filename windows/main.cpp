@@ -14,7 +14,9 @@
 #include <objbase.h>
 #include <winreg.h>
 
+#include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <stdexcept>
@@ -80,6 +82,25 @@ int vsock_registry(uint32_t port, bool remove)
 
 namespace {
 
+// strtol wrapper: rejects garbage atoi would silently accept
+// (empty, trailing junk, overflow, out-of-range).
+long parse_long(const char *s, const char *name, long lo, long hi)
+{
+    if (!s || !*s) {
+        fprintf(stderr, "hvcam-host: empty value for %s\n", name);
+        exit(2);
+    }
+    char *end = nullptr;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (errno == ERANGE || end == s || *end != '\0' || v < lo || v > hi) {
+        fprintf(stderr, "hvcam-host: invalid %s '%s' (need %ld..%ld)\n",
+                name, s, lo, hi);
+        exit(2);
+    }
+    return v;
+}
+
 void usage()
 {
     fprintf(stderr,
@@ -120,19 +141,29 @@ int main(int argc, char **argv)
             return argv[++i];
         };
         if (a == "--list") do_list = true;
-        else if (a == "--device") opts.device_index = atoi(need("--device"));
-        else if (a == "--port") port = (uint32_t)atoi(need("--port"));
-        else if (a == "--width") opts.width = atoi(need("--width"));
-        else if (a == "--height") opts.height = atoi(need("--height"));
-        else if (a == "--fps") opts.fps = atoi(need("--fps"));
+        else if (a == "--device")
+            opts.device_index = (int)parse_long(need("--device"), "--device", 0, 64);
+        else if (a == "--port")
+            port = (uint32_t)parse_long(need("--port"), "--port", 1, 65535);
+        else if (a == "--width")
+            opts.width = (int)parse_long(need("--width"), "--width", 0, 16384);
+        else if (a == "--height")
+            opts.height = (int)parse_long(need("--height"), "--height", 0, 16384);
+        else if (a == "--fps")
+            opts.fps = (int)parse_long(need("--fps"), "--fps", 0, 480);
         else if (a == "--tcp") {
             // Accepts "IP" or "IP:port" — the suffix becomes `port`
-            // and only the bare address reaches inet_pton.
+            // and only the bare address reaches inet_pton (IPv4).
             tcp_ip = need("--tcp");
             size_t colon = tcp_ip.rfind(':');
             if (colon != std::string::npos) {
-                port = (uint32_t)atoi(tcp_ip.c_str() + colon + 1);
+                port = (uint32_t)parse_long(tcp_ip.c_str() + colon + 1,
+                                            "--tcp port", 1, 65535);
                 tcp_ip.resize(colon);
+            }
+            if (tcp_ip.empty()) {
+                fprintf(stderr, "hvcam-host: --tcp requires an address\n");
+                return 2;
             }
         }
         else if (a == "--vm-guid") {
