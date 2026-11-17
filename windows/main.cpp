@@ -15,6 +15,7 @@
 #include <winreg.h>
 
 #include <cerrno>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -124,6 +125,32 @@ uint32_t parse_port(const char *s, const char *name)
     return (uint32_t)v;
 }
 
+// WSL2's utility VM only connects to listeners bound to its EXACT
+// VmId — wildcard binds never match (microsoft/WSL#5751). When the
+// user did not pin --vm-guid, discover the running WSL VM with
+// `wsl -- wslinfo --vm-id` (no admin needed; all distros share one
+// utility VM) and bind to it. Returns false on any failure.
+bool detect_wsl_vmid(GUID *out)
+{
+    FILE *p = _popen("wsl.exe -- wslinfo --vm-id", "r");
+    if (!p)
+        return false;
+    char line[128] = {0};
+    bool ok = fgets(line, sizeof(line), p) != nullptr;
+    _pclose(p);
+    if (!ok)
+        return false;
+    std::string g(line);
+    while (!g.empty() && isspace((unsigned char)g.back()))
+        g.pop_back();
+    if (g.empty())
+        return false;
+    if (g.front() != '{')
+        g = "{" + g + "}";
+    std::wstring wg(g.begin(), g.end());
+    return SUCCEEDED(CLSIDFromString(wg.c_str(), out));
+}
+
 void usage()
 {
     fprintf(stderr,
@@ -227,6 +254,17 @@ int main(int argc, char **argv)
         for (auto &d : devs)
             fprintf(stderr, "[%d] %ls\n", d.index, d.name.c_str());
         return devs.empty() ? 1 : 0;
+    }
+
+    // vsock without --vm-guid: pin the bind to the running WSL VM.
+    // Wildcard stays the fallback for non-WSL Hyper-V guests, but
+    // WSL's utility VM will never match it — detection is the only
+    // way this transport works out of the box for the target case.
+    if (tcp_ip.empty() && !have_vm_guid && detect_wsl_vmid(&allowed_vm)) {
+        have_vm_guid = true;
+        wchar_t gbuf[40];
+        StringFromGUID2(allowed_vm, gbuf, 40);
+        fprintf(stderr, "hvcam: pinned vsock bind to WSL vm %ls\n", gbuf);
     }
 
     WSADATA wsa{};
