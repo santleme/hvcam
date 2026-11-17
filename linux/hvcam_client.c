@@ -29,31 +29,42 @@ static int64_t now_us(void)
  * Returns 0 ready, -2 timeout, -1 error/peer-close. */
 static int wait_readable(int fd, int64_t deadline_us)
 {
-    int64_t left = deadline_us - now_us();
-    if (left <= 0)
-        return -2;
     struct pollfd pfd = {fd, POLLIN, 0};
-    int ms = (int)(left / 1000) + (left % 1000 ? 1 : 0);
-    int r;
-    do {
-        r = poll(&pfd, 1, ms);
-    } while (r < 0 && errno == EINTR);
-    if (r == 0)
-        return -2;
-    if (r < 0)
-        return -1;
-    if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))
-        return -1;
-    return 0;
+    for (;;) {
+        /* Recomputa o restante a cada tentativa — EINTR nao
+         * reinicia o intervalo cheio, senao sinais periodicos
+         * venceriam o deadline indefinidamente. */
+        int64_t left = deadline_us - now_us();
+        if (left <= 0)
+            return -2;
+        int ms = (int)(left / 1000) + (left % 1000 ? 1 : 0);
+        int r = poll(&pfd, 1, ms);
+        if (r < 0 && errno == EINTR)
+            continue;
+        if (r == 0)
+            return -2;
+        if (r < 0)
+            return -1;
+        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))
+            return -1;
+        return 0;
+    }
 }
 
-/* deadline_us == INT64_MAX -> bloqueante (modo sem timeout). */
+/* deadline_us == INT64_MAX -> bloqueante (modo sem timeout).
+ * Retorna -2 so quando NENHUM byte foi consumido nesta chamada:
+ * estourar o prazo no meio de uma resposta deixa o stream
+ * dessincronizado (o resto do frame seria lido como header na
+ * proxima grab) — ai e -1, falha terminal que exige reconectar. */
 static int read_full(int fd, void *buf, size_t n, int64_t deadline_us)
 {
     uint8_t *p = (uint8_t *)buf;
+    size_t total = n;
     while (n > 0) {
         if (deadline_us != INT64_MAX) {
             int w = wait_readable(fd, deadline_us);
+            if (w == -2)
+                return n < total ? -1 : -2;
             if (w)
                 return w;
         }
@@ -168,6 +179,8 @@ static int pull_frame(int fd, HvFrameHeader *hdr, void *payload,
         if (chunk == 0)
             chunk = remaining > sizeof(scratch) ? (uint32_t)sizeof(scratch) : remaining;
         rc = read_full(fd, dst, chunk, deadline_us);
+        if (rc == -2)
+            return -1; /* header ja saiu do socket: resposta parcial = desync */
         if (rc)
             return rc;
         if (dst != scratch)

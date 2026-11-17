@@ -78,6 +78,10 @@ int main(int argc, char **argv)
         }
         else if (a == "--vm-guid") {
             std::string g = need("--vm-guid");
+            // O log do accept imprime o VmId sem chaves; CLSIDFromString
+            // so aceita {...} ou ProgID — envolve antes de parsear.
+            if (!g.empty() && g.front() != '{')
+                g = "{" + g + "}";
             std::wstring wg(g.begin(), g.end());
             if (FAILED(CLSIDFromString(wg.c_str(), &allowed_vm))) {
                 fprintf(stderr, "hvcam-host: --vm-guid invalido\n");
