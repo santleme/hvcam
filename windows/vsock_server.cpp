@@ -157,10 +157,11 @@ int run_server_vsock(FrameSlots *slots, uint32_t port,
     }
     SOCKADDR_HV a{};
     a.Family = AF_HYPERV;
-    // WILDCARD: required for WSL interop — CHILDREN-scoped binds do
-    // not match the utility VM's connect (connect times out, tested).
-    // Access control lives at accept: peer VmId is logged and
-    // --vm-guid pins the listener to a single guest.
+    // WSL2's utility VM only matches listeners bound to its exact
+    // VmId (microsoft/WSL#5751) — main() auto-detects it via
+    // wslinfo when --vm-guid is absent. Wildcard is the fallback for
+    // non-WSL Hyper-V guests; access control lives at accept, where
+    // the peer VmId is logged and --vm-guid pins a single guest.
     a.VmId = allowed_vm ? *allowed_vm : HV_GUID_WILDCARD;
     a.ServiceId = service_guid_for_port(port);
     if (bind(l, (const sockaddr *)&a, sizeof(a)) == SOCKET_ERROR) {
