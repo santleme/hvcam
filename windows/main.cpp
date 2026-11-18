@@ -170,7 +170,8 @@ void usage()
         "                        30 fps; auto-exposure caps ~20 indoors)\n"
         "  --gain N              manual gain, device units\n"
         "  --lock-exposure       pin current exposure (manual)\n"
-        "  --lock-focus          pin current focus (manual)\n");
+        "  --lock-focus          pin current focus (manual)\n"
+        "  --lock-gain           pin current gain (manual)\n");
 }
 
 } // namespace
@@ -255,6 +256,7 @@ int main(int argc, char **argv)
             opts.gain = (int)parse_long(need("--gain"), "--gain", 0, 100000);
         else if (a == "--lock-exposure") opts.lock_exposure = true;
         else if (a == "--lock-focus") opts.lock_focus = true;
+        else if (a == "--lock-gain") opts.lock_gain = true;
         else if (a == "--no-auto-pin") no_auto_pin = true;
         else if (a == "--reverse") do_reverse = true;
         else if (a == "--register-vsock") do_register = true;

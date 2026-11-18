@@ -6,8 +6,8 @@
     bgr = cam.to_bgr(info, frame)           # cv2 conversion, or None
     cam.close()
 
-Needs libhvcam.so on LD_LIBRARY_PATH (or hvcam.build it next to this
-file) and numpy. cv2 is optional — only to_bgr() imports it; grab()
+Needs libhvcam.so on LD_LIBRARY_PATH (or built next to this file)
+and numpy. cv2 is optional — only to_bgr() imports it; grab()
 hands you the raw wire payload either way.
 """
 
@@ -117,7 +117,9 @@ class Camera:
 
     `listen=True` waits for the Windows host to connect in
     (`hvcam-host --reverse`) instead of dialing out — the path that
-    needs no admin-side service registration.
+    needs no admin-side service registration. Note the listener
+    accepts ONE host connection: if the host restarts, create a new
+    Camera(listen=True) to accept the next one.
     """
 
     def __init__(self, port=8765, tcp=None, listen=False, ring=3):
