@@ -38,6 +38,10 @@ else()
 
     add_executable(hvcam-dump linux/hvcam_dump.c)
     target_link_libraries(hvcam-dump PRIVATE hvcam)
+    # $ORIGIN rpath: the shipped tarball keeps hvcam-dump next to
+    # libhvcam.so — without this the build dir's absolute path is
+    # baked in and the binary can't start from an extracted archive.
+    set_target_properties(hvcam-dump PROPERTIES BUILD_RPATH_USE_ORIGIN ON)
 
     enable_testing()
     add_executable(test_loopback tests/test_loopback.c)
@@ -46,6 +50,11 @@ else()
 
     add_executable(test_score tests/test_score.c)
     add_test(NAME score COMMAND test_score)
+
+    # Tests drive side effects through assert() (bind/listen/pthread_create).
+    # Release's -DNDEBUG would compile the bodies out — keep them live.
+    target_compile_options(test_loopback PRIVATE -UNDEBUG)
+    target_compile_options(test_score PRIVATE -UNDEBUG)
 
     find_program(PYTHON3_EXECUTABLE NAMES python3 python)
     if(PYTHON3_EXECUTABLE)

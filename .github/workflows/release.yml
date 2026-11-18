@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.ref_name }}
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B build -A x64
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Package
+        shell: pwsh
+        run: |
+          $tag = "$env:TAG"
+          $stage = "dist\hvcam-$tag-windows-x86_64"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item "build\Release\hvcam-host.exe" $stage
+          Copy-Item README.md, LICENSE $stage
+          Compress-Archive -Path "$stage\*" -DestinationPath "dist\hvcam-$tag-windows-x86_64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*.zip
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install Python test deps
+        run: python -m pip install numpy
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Package
+        run: |
+          stage="dist/hvcam-$TAG-linux-x86_64"
+          mkdir -p "$stage/include" "$stage/python"
+          cp build/libhvcam.so build/hvcam-dump "$stage/"
+          cp include/protocol.h include/media_score.h linux/hvcam_client.h "$stage/include/"
+          cp bindings/python/hvcam.py "$stage/python/"
+          cp README.md LICENSE "$stage/"
+          tar -czf "dist/hvcam-$TAG-linux-x86_64.tar.gz" -C dist "hvcam-$TAG-linux-x86_64"
+      - name: Smoke test extracted package
+        run: |
+          tmp=$(mktemp -d)
+          tar -xzf "dist/hvcam-$TAG-linux-x86_64.tar.gz" -C "$tmp"
+          "$tmp/hvcam-$TAG-linux-x86_64/hvcam-dump" --help 2>&1 | grep -q "usage: hvcam-dump"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*.tar.gz
+
+  release:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ls -la dist
+          pre=""
+          [[ "${TAG%%+*}" == *-* ]] && pre="--prerelease"
+          gh release create "$TAG" dist/* \
+            --repo "${{ github.repository }}" \
+            --title "$TAG" \
+            --verify-tag \
+            --generate-notes \
+            $pre
