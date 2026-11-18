@@ -1,5 +1,9 @@
 # hvcam
 
+<p align="center">
+  <img src="assets/hvcam-pixel-art.png" alt="Webcam HVCam com Linux no WSL2" width="420">
+</p>
+
 **Your Windows webcam, inside WSL2 — *no kernel rebuild, no usbipd, no admin.***
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
