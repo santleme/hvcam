@@ -52,6 +52,8 @@ def _load():
     lib.hvcam_connect.restype = ctypes.c_int
     lib.hvcam_connect_tcp.argtypes = [ctypes.c_char_p, ctypes.c_uint16]
     lib.hvcam_connect_tcp.restype = ctypes.c_int
+    lib.hvcam_listen.argtypes = [ctypes.c_uint32]
+    lib.hvcam_listen.restype = ctypes.c_int
     lib.hvcam_grab_next.argtypes = [
         ctypes.c_int,
         ctypes.POINTER(HvFrameHeader),
@@ -70,19 +72,40 @@ _MAX_PAYLOAD = 64 * 1024 * 1024
 
 
 class Camera:
-    """One client connection; pulls the newest frame on demand."""
+    """One client connection; pulls the newest frame on demand.
 
-    def __init__(self, port=8765, tcp=None):
+    `ring` receive slots rotate behind the returned arrays: a frame
+    from grab() stays intact for the next `ring - 1` grab() calls —
+    another thread can keep processing it while the capture loop
+    pulls ahead. ring=1 restores the old single-buffer semantics
+    (every grab() clobbers the previous array). Still zero-copy:
+    the arrays are views into the slots.
+
+    `listen=True` waits for the Windows host to connect in
+    (`hvcam-host --reverse`) instead of dialing out — the path that
+    needs no admin-side service registration.
+    """
+
+    def __init__(self, port=8765, tcp=None, listen=False, ring=3):
+        if ring < 1:
+            raise ValueError("hvcam: ring must be >= 1")
         if tcp is not None:
             host, _, p = tcp.partition(":")
             self.fd = _LIB.hvcam_connect_tcp(
                 host.encode() or None, int(p or port)
             )
+        elif listen:
+            self.fd = _LIB.hvcam_listen(port)
         else:
             self.fd = _LIB.hvcam_connect(port)
         if self.fd < 0:
             raise OSError(f"hvcam: connect failed ({self.fd})")
-        self._buf = (ctypes.c_ubyte * _MAX_PAYLOAD)()
+        # np.empty: virtual reservation, pages commit on first write —
+        # unlike a ctypes buffer it is not zero-filled up front.
+        self._slots = [
+            np.empty(_MAX_PAYLOAD, dtype=np.uint8) for _ in range(ring)
+        ]
+        self._slot = 0
         self._hdr = HvFrameHeader()
         self._last = ctypes.c_uint64(0xFFFFFFFFFFFFFFFF)
 
@@ -91,18 +114,20 @@ class Camera:
 
         Blocks until a frame newer than the previous one arrives or
         `timeout_ms` elapses (then raises TimeoutError)."""
+        slot = self._slots[self._slot]
         n = _LIB.hvcam_grab_next(
-            self.fd, ctypes.byref(self._hdr), self._buf,
+            self.fd, ctypes.byref(self._hdr), slot.ctypes.data,
             _MAX_PAYLOAD, ctypes.byref(self._last), timeout_ms,
         )
         if n == -2:
             raise TimeoutError("hvcam: no new frame")
         if n < 0:
             raise OSError("hvcam: stream dropped")
+        self._slot = (self._slot + 1) % len(self._slots)
         h = self._hdr
-        # Real view over the persistent buffer — overwritten by the
-        # next grab(); .copy() if you need to keep the frame.
-        arr = np.frombuffer(self._buf, dtype=np.uint8, count=n)
+        # View into the current ring slot — stays valid for the next
+        # len(slots)-1 grabs; .copy() to keep it longer.
+        arr = slot[:n]
         info = {
             "seq": h.seq_num,
             "ts_us": h.timestamp_us,
