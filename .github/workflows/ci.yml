@@ -23,6 +23,9 @@ jobs:
       - name: Build
         run: cmake --build build -j
       - name: Test
+        # shell: bash turns on pipefail — without it the default `bash -e`
+        # shell returns tee's status and a failing test is masked.
+        shell: bash
         run: ctest --test-dir build --output-on-failure | tee ctest.log
       - name: python_ring must not skip
         run: grep -E "python_ring.*\bPassed\b" ctest.log

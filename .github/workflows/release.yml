@@ -67,6 +67,8 @@ jobs:
       - name: Build
         run: cmake --build build -j
       - name: Test
+        # shell: bash turns on pipefail — see ci.yml.
+        shell: bash
         run: ctest --test-dir build --output-on-failure | tee ctest.log
       - name: python_ring must not skip
         run: grep -E "python_ring.*\bPassed\b" ctest.log
@@ -80,15 +82,21 @@ jobs:
           cp README.md LICENSE "$stage/"
           tar -czf "dist/hvcam-$TAG-linux-x86_64.tar.gz" -C dist "hvcam-$TAG-linux-x86_64"
       - name: Smoke test extracted package
+        # shell: bash for pipefail on the ldd|tee below.
+        shell: bash
         run: |
           tmp=$(mktemp -d)
           tar -xzf "dist/hvcam-$TAG-linux-x86_64.tar.gz" -C "$tmp"
           pkg="$tmp/hvcam-$TAG-linux-x86_64"
           # $ORIGIN rpath must resolve libhvcam.so next to the binary
-          # and nothing may be left unbound.
+          # and nothing may be left unbound. `! cmd` is exempt from
+          # errexit, so an explicit if+exit is required to fail.
           ldd "$pkg/hvcam-dump" | tee ldd.log
           grep -q "libhvcam.so =>" ldd.log
-          ! grep -q "not found" ldd.log
+          if grep -q "not found" ldd.log; then
+            echo "unresolved libraries in extracted package"
+            exit 1
+          fi
           # --help exits 2 by contract — capture the code itself instead
           # of piping stdout, which would mask the exit status.
           rc=0
@@ -113,7 +121,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: Guard — tag must descend from main
+      - name: Guard — tag must be reachable from main
         run: |
           git fetch --no-tags origin main
           git merge-base --is-ancestor HEAD origin/main
