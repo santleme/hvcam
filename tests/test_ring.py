@@ -106,15 +106,17 @@ def check_hvcam_lib_pin():
     # a stale build while believing it tested the requested one.
     env = dict(os.environ)
     env["HVCAM_LIB"] = "/nonexistent/dir/libhvcam.so"
-    env["PYTHONPATH"] = os.path.dirname(hvcam.__file__)
+    binding_dir = os.path.dirname(hvcam.__file__)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [binding_dir, env["PYTHONPATH"]] if env.get("PYTHONPATH")
+        else [binding_dir])
     r = subprocess.run([sys.executable, "-c", "import hvcam"],
                        env=env, capture_output=True)
     assert r.returncode != 0, \
         "bad HVCAM_LIB pin silently fell back to the default search"
 
-    print("test_ring: OK")
-
 
 if __name__ == "__main__":
     main()
     check_hvcam_lib_pin()
+    print("test_ring: OK")

@@ -58,7 +58,9 @@ bool detect_wsl_vmid(GUID *out)
         return false;
     char line[128] = {0};
     bool ok = fgets(line, sizeof(line), p) != nullptr;
-    _pclose(p);
+    // A nonzero wsl.exe exit code means no usable id came out either.
+    if (_pclose(p) != 0)
+        ok = false;
     if (!ok)
         return false;
     std::string g(line);
@@ -228,7 +230,6 @@ int vsock_accept_loop(VsockBind *b, uint32_t port, FrameSlots *slots,
         closesocket(c);
         fprintf(stderr, "hvcam: client left\n");
     }
-    return 0;
 }
 
 int accept_loop(SOCKET listener, FrameSlots *slots, const char *kind,
@@ -270,7 +271,6 @@ int accept_loop(SOCKET listener, FrameSlots *slots, const char *kind,
         closesocket(c);
         fprintf(stderr, "hvcam: client left\n");
     }
-    return 0;
 }
 
 } // namespace
@@ -368,7 +368,6 @@ int run_client_vsock_reverse(FrameSlots *slots, uint32_t port,
         closesocket(c);
         fprintf(stderr, "hvcam: guest disconnected; reconnecting...\n");
     }
-    return 0;
 }
 
 int run_server_tcp(FrameSlots *slots, const char *bind_ip, uint16_t port)
