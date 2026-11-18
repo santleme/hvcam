@@ -1,7 +1,7 @@
 # hvcam
 
 <p align="center">
-  <img src="assets/hvcam-pixel-art.png" alt="Webcam HVCam com Linux no WSL2" width="420">
+  <img src="assets/hvcam-pixel-art.png" alt="HVCam webcam with Linux running in WSL2" width="420">
 </p>
 
 **Your Windows webcam, inside WSL2 — *no kernel rebuild, no usbipd, no admin.***
