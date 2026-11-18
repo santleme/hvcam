@@ -101,6 +101,12 @@ int main(void)
     assert(S(HVCAM_FMT_MJPEG, 1920, 1080, 30000, 1001, &fhd) >
            S(HVCAM_FMT_YUY2, 1920, 1080, 5, 1, &fhd));
 
+    /* Negative request values are "unset", not a huge unsigned
+     * request — a negative width must score exactly like none. */
+    const HvScoreOpts neg = {-1, -1, -1, 0};
+    assert(S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &neg) ==
+           S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &none));
+
     printf("test_score: OK\n");
     return 0;
 }

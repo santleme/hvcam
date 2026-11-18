@@ -27,6 +27,7 @@ struct MfOpenOptions {
     int fps = 0;     // 0 = camera default
     bool lock_exposure = false;
     bool lock_focus = false;
+    bool lock_gain = false;    // VideoProcAmp_Gain -> manual
     // CameraControl_Exposure units are log2 seconds: -5 ≈ 1/32 s,
     // -6 = 1/64 s. Below ~-5 the sensor can actually sustain 30 fps —
     // auto-exposure stretches to 1/20 s indoors (low-light comp) and

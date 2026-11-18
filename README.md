@@ -107,6 +107,7 @@ hvcam-host --device 0 --width 1280 --height 720 --lock-focus
 hvcam-host --format mjpeg                      # hard filter to one wire format (yuy2|nv12|mjpeg|
                                                #   bgr24|bgrx32); fails if the camera lacks it
 hvcam-host --exposure -6 --gain 40             # manual exposure (log2 s) + gain — real 30 fps
+hvcam-host --lock-exposure --lock-gain         # pin the current values instead
 hvcam-host --tcp 127.0.0.1:8765                # TCP fallback (IP[:port]); unencrypted
 hvcam-host --reverse                           # connect OUT to the guest listener — zero admin
 hvcam-host --vm-guid <guid>                    # accept only that guest (skips auto-pin)
@@ -125,7 +126,10 @@ hvcam-host --no-auto-pin                       # wildcard bind, never re-pin (no
 > `--register-vsock` at all. In normal guest→host mode the host now
 > warns at startup when the port's service GUID is unregistered —
 > that is the failure that used to surface as a silent client
-> timeout.
+> timeout. Each listen accepts **one** host connection — if the host
+> restarts, start a new listener (`--reverse` retries forever on the
+> host side, so pair it with a small restart loop when you want a
+> persistent link).
 
 ### Python
 
@@ -147,6 +151,9 @@ never loads a stale default-build library).
 than `cv2.imdecode`: 3.0 ms vs 7.8 ms at 1080p) and falls back to cv2
 otherwise; `HVCAM_TURBOJPEG=<path to libturbojpeg.so>` points at a
 non-system library, `HVCAM_FASTDCT=1` trades a little quality for speed.
+Treat `HVCAM_LIB`/`HVCAM_TURBOJPEG` like `LD_LIBRARY_PATH`: they load
+native code from the named path, so only set them to trusted locations —
+never from untrusted input.
 
 ## Repository layout
 

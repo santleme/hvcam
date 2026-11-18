@@ -85,6 +85,11 @@ int main(int argc, char **argv)
         }
     }
 
+    if (tcp && use_listen) {
+        fprintf(stderr, "hvcam-dump: --tcp and --listen are exclusive\n");
+        return 2;
+    }
+
     int fd;
     if (tcp) {
         /* host[:port] — the colon splits a TCP-style port suffix.

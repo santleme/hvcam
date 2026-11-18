@@ -42,11 +42,14 @@ static inline int32_t hvcam_media_score(uint32_t fmt, uint32_t w, uint32_t h,
     if (o->prefer_format && fmt != o->prefer_format)
         return INT32_MIN;
     int32_t score = 0;
-    if (o->width && w == (uint32_t)o->width) score += 10000;
-    if (o->height && h == (uint32_t)o->height) score += 10000;
-    if (o->width && w != (uint32_t)o->width)
+    /* Requests are int32_t; only POSITIVE values are a request —
+     * treating <= 0 as "unset" keeps a negative value from being
+     * cast into a huge uint32 and matching a phantom dimension. */
+    if (o->width > 0 && w == (uint32_t)o->width) score += 10000;
+    if (o->height > 0 && h == (uint32_t)o->height) score += 10000;
+    if (o->width > 0 && w != (uint32_t)o->width)
         score -= (w > (uint32_t)o->width ? 200 : 50);
-    if (o->height && h != (uint32_t)o->height) score -= 200;
+    if (o->height > 0 && h != (uint32_t)o->height) score -= 200;
     /* Delivered frame rate. On USB 2.0 the isochronous ceiling
      * (~24 MB/s) pins 1080p YUY2 (4.15 MB/frame) at ~5 fps while the
      * camera's on-chip MJPEG sustains 30 — preferring raw formats
@@ -54,21 +57,24 @@ static inline int32_t hvcam_media_score(uint32_t fmt, uint32_t w, uint32_t h,
      * plateau outranks the resolution and format terms COMBINED
      * (a 30 fps VGA mode beats a 15 fps 1080p mode); below it the
      * score is linear. NTSC 29.97 rounds into the plateau. */
-    uint32_t fps = fps_den ? (fps_num + fps_den / 2) / fps_den : 0;
-    if (o->fps && fps == (uint32_t)o->fps)
+    /* 64-bit intermediates: fps_num + fps_den/2 and w*h can both
+     * overflow uint32_t on exotic descriptors. */
+    uint32_t fps = fps_den
+        ? (uint32_t)(((uint64_t)fps_num + fps_den / 2) / fps_den) : 0;
+    if (o->fps > 0 && fps == (uint32_t)o->fps)
         score += 1000;
     score += fps >= 30 ? 300 : (int32_t)fps * 2;
     /* Resolution, saturating at 1080p: with no explicit request the
      * largest smooth mode should beat a tiny faster one. */
-    uint32_t px = w * h;
-    score += (int32_t)((px > 2073600u ? 2073600u : px) / 51840u);
+    uint64_t px = (uint64_t)w * h;
+    score += (int32_t)((px > 2073600ull ? 2073600ull : px) / 51840ull);
     /* Format preference breaks ties at equal advertised fps. The
      * winner flips at 720p: a big raw frame (1080p YUY2 = 4.15 MB,
      * NV12 = 3.1 MB) cannot actually reach its advertised rate over
      * USB 2.0's ~24 MB/s isochronous ceiling — MJPEG (~0.2 MB) can —
      * so compression wins large-frame ties; below 720p the raw
      * pixels win (they fit the bus and skip a decode). */
-    int32_t large = px >= 921600u; /* >= 1280x720 */
+    int32_t large = px >= 921600ull; /* >= 1280x720 */
     if (fmt == HVCAM_FMT_MJPEG) score += large ? 32 : 20;
     else if (fmt == HVCAM_FMT_YUY2) score += 30;
     else if (fmt == HVCAM_FMT_NV12) score += 25;
