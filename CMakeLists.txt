@@ -38,6 +38,10 @@ else()
 
     add_executable(hvcam-dump linux/hvcam_dump.c)
     target_link_libraries(hvcam-dump PRIVATE hvcam)
+    # $ORIGIN rpath: the shipped tarball keeps hvcam-dump next to
+    # libhvcam.so — without this the build dir's absolute path is
+    # baked in and the binary can't start from an extracted archive.
+    set_target_properties(hvcam-dump PROPERTIES BUILD_RPATH_USE_ORIGIN ON)
 
     enable_testing()
     add_executable(test_loopback tests/test_loopback.c)
