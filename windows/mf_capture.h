@@ -27,8 +27,18 @@ struct MfOpenOptions {
     int fps = 0;     // 0 = camera default
     bool lock_exposure = false;
     bool lock_focus = false;
-    // Optional: prefer this exact subtype if the camera offers it.
-    // 0 = auto (prefer uncompressed yuy2/nv12, then mjpeg).
+    // CameraControl_Exposure units are log2 seconds: -5 ≈ 1/32 s,
+    // -6 = 1/64 s. Below ~-5 the sensor can actually sustain 30 fps —
+    // auto-exposure stretches to 1/20 s indoors (low-light comp) and
+    // caps the stream near 20 fps. INT32_MIN = leave at auto.
+    int exposure = INT32_MIN;
+    // VideoProcAmp_Gain, device units; INT32_MIN = leave at auto.
+    int gain = INT32_MIN;
+    // Optional hard filter: restrict negotiation to this subtype.
+    // If the camera offers no matching type, open() fails —
+    // --format never silently degrades into another format.
+    // 0 = auto (highest delivered frame rate at the requested size;
+    // see include/media_score.h).
     uint32_t prefer_format = 0;
 };
 
