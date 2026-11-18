@@ -36,21 +36,27 @@ class HvFrameHeader(ctypes.Structure):
 
 def _load():
     here = os.path.dirname(os.path.abspath(__file__))
-    for cand in (
-        # HVCAM_LIB pins an explicit .so (ctest sets it to the
-        # configured build dir so `cmake -B out` cannot go stale).
-        *([os.environ["HVCAM_LIB"]] if os.environ.get("HVCAM_LIB") else []),
-        os.path.join(here, "libhvcam.so"),
-        os.path.join(here, "..", "..", "build", "libhvcam.so"),
-        "libhvcam.so",
-    ):
-        try:
-            lib = ctypes.CDLL(cand)
-            break
-        except OSError:
-            continue
+    # HVCAM_LIB pins an explicit .so (ctest sets it to the configured
+    # build dir so `cmake -B out` cannot go stale). The pin is
+    # authoritative: a bad path must fail loudly — falling back to a
+    # different build would let CI test the wrong library while
+    # believing it tested the requested one.
+    pinned = os.environ.get("HVCAM_LIB")
+    if pinned:
+        lib = ctypes.CDLL(pinned)
     else:
-        raise OSError("libhvcam.so not found (LD_LIBRARY_PATH)")
+        for cand in (
+            os.path.join(here, "libhvcam.so"),
+            os.path.join(here, "..", "..", "build", "libhvcam.so"),
+            "libhvcam.so",
+        ):
+            try:
+                lib = ctypes.CDLL(cand)
+                break
+            except OSError:
+                continue
+        else:
+            raise OSError("libhvcam.so not found (LD_LIBRARY_PATH)")
     lib.hvcam_connect.argtypes = [ctypes.c_uint32]
     lib.hvcam_connect.restype = ctypes.c_int
     lib.hvcam_connect_tcp.argtypes = [ctypes.c_char_p, ctypes.c_uint16]
