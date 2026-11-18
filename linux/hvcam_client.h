@@ -22,6 +22,13 @@ int hvcam_connect(uint32_t port);
  * `host` may be NULL for "127.0.0.1". */
 int hvcam_connect_tcp(const char *host, uint16_t port);
 
+/* Reverse direction: binds a vsock listener and blocks until the
+ * Windows host connects in (hvcam-host --reverse). Needs no admin
+ * registration on either side — host->guest hvsock is unrestricted.
+ * Returns the connected stream fd (usable with hvcam_grab*), or a
+ * negative value. One connection per call. */
+int hvcam_listen(uint32_t port);
+
 /* Pulls the newest frame: sends REQ, reads the header, then reads
  * up to `cap` payload bytes into `payload` (may be NULL to get only
  * the header — payload is then drained and discarded).

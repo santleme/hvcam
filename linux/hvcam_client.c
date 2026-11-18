@@ -123,6 +123,32 @@ int hvcam_connect(uint32_t port)
     return fd;
 }
 
+int hvcam_listen(uint32_t port)
+{
+    int l = socket(AF_VSOCK, SOCK_STREAM, 0);
+    if (l < 0)
+        return -errno;
+
+    struct sockaddr_vm addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.svm_family = AF_VSOCK;
+    addr.svm_cid = VMADDR_CID_ANY; /* host->guest connects arrive here */
+    addr.svm_port = port;
+
+    if (bind(l, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
+        listen(l, 1) < 0) {
+        int e = errno;
+        close(l);
+        return -e;
+    }
+    /* Blocks until the host's --reverse connect lands. Each call
+     * accepts exactly one connection; call again for the next. */
+    int fd = accept(l, NULL, NULL);
+    int e = errno;
+    close(l);
+    return fd < 0 ? -e : fd;
+}
+
 int hvcam_connect_tcp(const char *host, uint16_t port)
 {
     char service[8];
