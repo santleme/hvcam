@@ -107,6 +107,21 @@ int main(void)
     assert(S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &neg) ==
            S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &none));
 
+    /* Overflow guards: both intermediates compute in uint64_t.
+     * UINT32_MAX/UINT32_MAX rounds to 1 fps — in uint32 the
+     * numerator+half sum wraps and yields 0. */
+    assert(S(HVCAM_FMT_MJPEG, 640, 480, UINT32_MAX, UINT32_MAX, &none) ==
+           S(HVCAM_FMT_MJPEG, 640, 480, 1, 1, &none));
+    /* A numerator still past 2^32 after +half must reach the >=30
+     * plateau — in uint32 the sum wraps to a 0 fps score. */
+    assert(S(HVCAM_FMT_MJPEG, 640, 480, UINT32_MAX, 2, &none) ==
+           S(HVCAM_FMT_MJPEG, 640, 480, 30, 1, &none));
+    /* 65536x65536 = 2^32 pixels wraps to 0 in uint32 — it must
+     * saturate at the 1080p cap and count as "large", scoring
+     * exactly like a real 1080p MJPEG@30. */
+    assert(S(HVCAM_FMT_MJPEG, 65536, 65536, 30, 1, &none) ==
+           S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &none));
+
     printf("test_score: OK\n");
     return 0;
 }
