@@ -57,6 +57,11 @@ jobs:
           cp bindings/python/hvcam.py "$stage/python/"
           cp README.md LICENSE "$stage/"
           tar -czf "dist/hvcam-$TAG-linux-x86_64.tar.gz" -C dist "hvcam-$TAG-linux-x86_64"
+      - name: Smoke test extracted package
+        run: |
+          tmp=$(mktemp -d)
+          tar -xzf "dist/hvcam-$TAG-linux-x86_64.tar.gz" -C "$tmp"
+          "$tmp/hvcam-$TAG-linux-x86_64/hvcam-dump" --help 2>&1 | grep -q "usage: hvcam-dump"
       - uses: actions/upload-artifact@v4
         with:
           name: linux
@@ -76,7 +81,7 @@ jobs:
         run: |
           ls -la dist
           pre=""
-          [[ "$TAG" == *-* ]] && pre="--prerelease"
+          [[ "${TAG%%+*}" == *-* ]] && pre="--prerelease"
           gh release create "$TAG" dist/* \
             --repo "${{ github.repository }}" \
             --title "$TAG" \
