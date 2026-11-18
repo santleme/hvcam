@@ -1,5 +1,9 @@
 # hvcam
 
+<p align="center">
+  <img src="assets/hvcam-pixel-art.png" alt="Webcam HVCam com Linux no WSL2" width="420">
+</p>
+
 **Low-latency webcam streaming from a Windows host into WSL2 over Hyper-V sockets.**
 
 A static, dependency-free `hvcam-host.exe` captures the camera on Windows via Media
