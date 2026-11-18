@@ -37,6 +37,9 @@ class HvFrameHeader(ctypes.Structure):
 def _load():
     here = os.path.dirname(os.path.abspath(__file__))
     for cand in (
+        # HVCAM_LIB pins an explicit .so (ctest sets it to the
+        # configured build dir so `cmake -B out` cannot go stale).
+        *([os.environ["HVCAM_LIB"]] if os.environ.get("HVCAM_LIB") else []),
         os.path.join(here, "libhvcam.so"),
         os.path.join(here, "..", "..", "build", "libhvcam.so"),
         "libhvcam.so",
@@ -221,8 +224,11 @@ class Camera:
         elif fmt == 4:
             tj = _turbojpeg()
             if tj is not None:
-                img = tj.decode(frame, pixel_format=_TJ_PF_BGR,
-                                flags=_TJ_FLAGS)
+                try:
+                    img = tj.decode(frame, pixel_format=_TJ_PF_BGR,
+                                    flags=_TJ_FLAGS)
+                except OSError:
+                    img = None
             else:
                 img = cv2.imdecode(frame, cv2.IMREAD_COLOR)
             if img is None:

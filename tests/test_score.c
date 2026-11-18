@@ -65,10 +65,28 @@ int main(void)
     assert(S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &fhd_30) >
            S(HVCAM_FMT_YUY2, 1920, 1080, 5, 1, &fhd_30));
 
-    /* prefer_format is the escape hatch and dominates the small
-     * terms even when it is the slower type. */
-    assert(S(HVCAM_FMT_YUY2, 1920, 1080, 5, 1, &fhd_yuy2) >
+    /* prefer_format is a hard filter, not a preference: other
+     * formats are eliminated even when they score far higher —
+     * --format yuy2 must not silently hand back MJPEG just because
+     * YUY2 exists only at VGA. */
+    assert(S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &fhd_yuy2) == INT32_MIN);
+    assert(S(HVCAM_FMT_NV12, 1920, 1080, 30, 1, &fhd_yuy2) == INT32_MIN);
+    /* Survives the filter with a positive score: -250 in size
+     * penalties is still outweighed by the 30 fps plateau. */
+    assert(S(HVCAM_FMT_YUY2, 640, 480, 30, 1, &fhd_yuy2) > 0);
+    assert(S(HVCAM_FMT_YUY2, 640, 480, 30, 1, &fhd_yuy2) >
            S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &fhd_yuy2));
+
+    /* Regression: the >=30fps plateau must outrank resolution and
+     * format combined — a 30 fps VGA YUY2 beats a 15 fps 1080p
+     * MJPEG in default negotiation (previously 95 < 102 picked the
+     * slower large mode). */
+    assert(S(HVCAM_FMT_YUY2, 640, 480, 30, 1, &none) >
+           S(HVCAM_FMT_MJPEG, 1920, 1080, 15, 1, &none));
+
+    /* NTSC 29.97 rounds into the >=30 plateau, not under it. */
+    assert(S(HVCAM_FMT_MJPEG, 1920, 1080, 30000, 1001, &none) >
+           S(HVCAM_FMT_MJPEG, 1920, 1080, 15, 1, &none));
 
     /* Bigger beats smaller at equal fps when nothing is requested. */
     assert(S(HVCAM_FMT_YUY2, 1920, 1080, 15, 1, &none) >
@@ -79,7 +97,7 @@ int main(void)
     assert(S(0, 1920, 1080, 30, 1, &none) == INT32_MIN);
     (void)S(HVCAM_FMT_YUY2, 1920, 1080, 0, 0, &none);
 
-    /* Fractional rates (NTSC 29.97) score like 30 for the >=30 cap. */
+    /* Fractional rates (NTSC 29.97) reach the >=30 plateau like 30. */
     assert(S(HVCAM_FMT_MJPEG, 1920, 1080, 30000, 1001, &fhd) >
            S(HVCAM_FMT_YUY2, 1920, 1080, 5, 1, &fhd));
 

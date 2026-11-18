@@ -394,9 +394,9 @@ void MfCapture::open(const MfOpenOptions &opts)
     ra->Release();
 
     // --- Negotiate ONCE: pick best native type ----------------------
-    // Unsupported subtypes leave BEFORE scoring; the first
-    // supported type is already a candidate, so any poor score still
-    // yields a usable fallback instead of rejecting the camera.
+    // Types filtered out by --format score INT32_MIN and never beat
+    // the initial best_score, so an impossible --format fails loudly
+    // below instead of silently degrading into another format.
     IMFMediaType *best = nullptr;
     int best_score = INT_MIN;
     for (DWORD i = 0;; i++) {
@@ -432,7 +432,9 @@ void MfCapture::open(const MfOpenOptions &opts)
         }
     }
     if (!best)
-        throw std::runtime_error("camera has no usable native type");
+        throw std::runtime_error(opts.prefer_format
+            ? "camera has no native type matching --format"
+            : "camera has no usable native type");
     check_hr(p_->reader->SetCurrentMediaType(
                (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, best),
              "SetCurrentMediaType");

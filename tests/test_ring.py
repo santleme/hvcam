@@ -76,6 +76,17 @@ def main():
     assert (a3 == 3).all(), f"frame 3 torn late: {a3[:4]}"
     assert (a4 == 4).all(), f"frame 4 torn late: {a4[:4]}"
 
+    # Corrupt MJPEG must surface as ValueError on BOTH decode paths —
+    # PyTurboJPEG raises OSError internally and must be translated.
+    bad = bytes([0xFF]) * 64
+    try:
+        cam.to_bgr({"width": W, "height": H, "format": 4, "flags": 1},
+                   np.frombuffer(bad, dtype=np.uint8))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("corrupt MJPEG did not raise ValueError")
+
     cam.close()
     lsock.close()
     t.join(5)

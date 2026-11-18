@@ -40,7 +40,7 @@ non-WSL guests.
 | --- | --- |
 | Transport | `AF_HYPERV`/`AF_VSOCK` over VMBus; service GUID `{<port as 8-digit hex>-facb-11e6-bd58-64006a7986d3}` (port 8765 → `0000223d-facb-11e6-bd58-64006a7986d3`) |
 | Capture | `IMFSourceReader` async callback on an MF worker thread; native media type set before the pump starts |
-| Negotiation | Scores every native type once (see [`include/media_score.h`](include/media_score.h)): requested size dominates, then **delivered fps**, then size, then format. At ≥720p MJPEG wins equal-fps ties — a 1080p raw frame (YUY2 4.15 MB, NV12 3.1 MB) cannot actually reach its advertised rate through USB 2.0's ~24 MB/s isochronous ceiling (~5 real fps), while on-chip MJPEG (~0.2 MB/frame) sustains 30 fps and shrinks the wire payload ~17× |
+| Negotiation | Scores every native type once (see [`include/media_score.h`](include/media_score.h)): explicit requests (`--width`/`--height`/`--fps`/`--format`) dominate, then **reaching the ≥30 fps plateau** (a 30 fps VGA mode beats a 15 fps 1080p one), then resolution, then format. At ≥720p MJPEG wins equal-fps ties — a 1080p raw frame (YUY2 4.15 MB, NV12 3.1 MB) cannot actually reach its advertised rate through USB 2.0's ~24 MB/s isochronous ceiling (~5 real fps), while on-chip MJPEG (~0.2 MB/frame) sustains 30 fps and shrinks the wire payload ~17× |
 | Exchange | Three-slot "always newest" buffer — capture and send never block each other |
 | Wire | 1-byte REQ pull → 36-byte `HvFrameHeader` + payload (YUY2, NV12, BGR24, BGRX32, MJPEG). See [`include/protocol.h`](include/protocol.h) |
 
@@ -104,7 +104,8 @@ ctest --test-dir build
 # Windows
 hvcam-host --list                              # enumerate UVC cameras
 hvcam-host --device 0 --width 1280 --height 720 --lock-focus
-hvcam-host --format mjpeg                      # force a wire format (yuy2|nv12|mjpeg|bgr24|bgrx32)
+hvcam-host --format mjpeg                      # hard filter to one wire format (yuy2|nv12|mjpeg|
+                                               #   bgr24|bgrx32); fails if the camera lacks it
 hvcam-host --exposure -6 --gain 40             # manual exposure (log2 s) + gain — real 30 fps
 hvcam-host --tcp 127.0.0.1:8765                # TCP fallback (IP[:port]); unencrypted
 hvcam-host --reverse                           # connect OUT to the guest listener — zero admin
@@ -139,7 +140,9 @@ bgr = cam.to_bgr(info, raw)  # optional cv2 conversion
 # .copy() to keep it longer; ring=1 restores single-buffer mode.
 ```
 
-`grab()` needs `libhvcam.so` on `LD_LIBRARY_PATH` or next to `hvcam.py`.
+`grab()` needs `libhvcam.so` on `LD_LIBRARY_PATH` or next to `hvcam.py`;
+`HVCAM_LIB=<path>` pins an explicit build (ctest uses it so `cmake -B out`
+never loads a stale default-build library).
 `to_bgr()` decodes MJPEG with PyTurboJPEG when importable (~2.5× faster
 than `cv2.imdecode`: 3.0 ms vs 7.8 ms at 1080p) and falls back to cv2
 otherwise; `HVCAM_TURBOJPEG=<path to libturbojpeg.so>` points at a

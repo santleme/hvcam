@@ -20,7 +20,9 @@ typedef struct HvScoreOpts {
     int32_t width;          /* requested; 0 = any */
     int32_t height;         /* requested; 0 = any */
     int32_t fps;            /* requested; 0 = any */
-    uint32_t prefer_format; /* enum HvPixelFormat; 0 = auto */
+    uint32_t prefer_format; /* enum HvPixelFormat; 0 = auto — when set,
+                             * a HARD filter: other formats score
+                             * INT32_MIN and cannot be selected */
 } HvScoreOpts;
 
 /* Higher score = better type. Returns INT32_MIN for a wire format
@@ -33,23 +35,29 @@ static inline int32_t hvcam_media_score(uint32_t fmt, uint32_t w, uint32_t h,
 {
     if (!fmt)
         return INT32_MIN;
+    /* --format is a hard filter: an explicitly chosen subtype must
+     * never silently degrade into another format that scores higher.
+     * No matching type = "no usable native type" error, which is the
+     * honest answer to an impossible --format request. */
+    if (o->prefer_format && fmt != o->prefer_format)
+        return INT32_MIN;
     int32_t score = 0;
     if (o->width && w == (uint32_t)o->width) score += 10000;
     if (o->height && h == (uint32_t)o->height) score += 10000;
     if (o->width && w != (uint32_t)o->width)
         score -= (w > (uint32_t)o->width ? 200 : 50);
     if (o->height && h != (uint32_t)o->height) score -= 200;
-    if (o->fps && fps_den && (fps_num / fps_den) == (uint32_t)o->fps)
-        score += 1000;
-    if (o->prefer_format && fmt == o->prefer_format) score += 500;
     /* Delivered frame rate. On USB 2.0 the isochronous ceiling
      * (~24 MB/s) pins 1080p YUY2 (4.15 MB/frame) at ~5 fps while the
      * camera's on-chip MJPEG sustains 30 — preferring raw formats
-     * unconditionally picks the slower stream. Everything at or
-     * above 30 fps counts as "smooth" and scores the same, so the
-     * resolution/format terms below decide among smooth modes. */
-    uint32_t fps = fps_den ? fps_num / fps_den : 0;
-    score += (int32_t)(fps > 30 ? 30 : fps) * 2;
+     * unconditionally picks the slower stream. Reaching the >=30fps
+     * plateau outranks the resolution and format terms COMBINED
+     * (a 30 fps VGA mode beats a 15 fps 1080p mode); below it the
+     * score is linear. NTSC 29.97 rounds into the plateau. */
+    uint32_t fps = fps_den ? (fps_num + fps_den / 2) / fps_den : 0;
+    if (o->fps && fps == (uint32_t)o->fps)
+        score += 1000;
+    score += fps >= 30 ? 300 : (int32_t)fps * 2;
     /* Resolution, saturating at 1080p: with no explicit request the
      * largest smooth mode should beat a tiny faster one. */
     uint32_t px = w * h;
