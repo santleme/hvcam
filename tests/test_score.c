@@ -5,11 +5,11 @@
  * a requested resolution the type delivering more REAL frames must
  * win, and raw formats only break ties at equal frame rate.
  */
-#include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
 
 #include "media_score.h"
+#include "test_assert.h"
 
 #define S(fmt, w, h, fn, fd, o) hvcam_media_score((fmt), (w), (h), (fn), (fd), (o))
 
@@ -24,12 +24,12 @@ int main(void)
 
     /* The USB 2.0 trap: requested 1080p, camera offers YUY2@5 and
      * MJPEG@30 — MJPEG must win or the stream pins at ~5 fps. */
-    assert(S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &fhd) >
+    TEST_ASSERT(S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &fhd) >
            S(HVCAM_FMT_YUY2, 1920, 1080, 5, 1, &fhd));
 
     /* Same at 720p: MJPEG@30 beats YUY2@10 — the rule is delivered
      * frame rate, not a resolution threshold. */
-    assert(S(HVCAM_FMT_MJPEG, 1280, 720, 30, 1, &hd) >
+    TEST_ASSERT(S(HVCAM_FMT_MJPEG, 1280, 720, 30, 1, &hd) >
            S(HVCAM_FMT_YUY2, 1280, 720, 10, 1, &hd));
 
     /* Equal frame rate, large frame: the compressed type wins the
@@ -37,89 +37,89 @@ int main(void)
      * actually flow through USB 2.0 (measured: NV12 delivers 13.6
      * real fps where MJPEG reaches ~20+), and even on USB 3 the
      * compressed payload is ~17x smaller on the wire. */
-    assert(S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &fhd) >
+    TEST_ASSERT(S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &fhd) >
            S(HVCAM_FMT_NV12, 1920, 1080, 30, 1, &fhd));
-    assert(S(HVCAM_FMT_MJPEG, 1280, 720, 30, 1, &hd) >
+    TEST_ASSERT(S(HVCAM_FMT_MJPEG, 1280, 720, 30, 1, &hd) >
            S(HVCAM_FMT_YUY2, 1280, 720, 30, 1, &hd));
 
     /* Equal frame rate at small size: raw pixels win — 640x480
      * uncompressed fits USB 2.0 trivially and skips a decode. */
-    assert(S(HVCAM_FMT_YUY2, 640, 480, 30, 1, &none) >
+    TEST_ASSERT(S(HVCAM_FMT_YUY2, 640, 480, 30, 1, &none) >
            S(HVCAM_FMT_MJPEG, 640, 480, 30, 1, &none));
-    assert(S(HVCAM_FMT_NV12, 640, 480, 30, 1, &none) >
+    TEST_ASSERT(S(HVCAM_FMT_NV12, 640, 480, 30, 1, &none) >
            S(HVCAM_FMT_MJPEG, 640, 480, 30, 1, &none));
 
     /* A raw type still wins when it is genuinely FASTER (below the
      * >=30fps plateau: 30 real fps outranks 15 compressed). */
-    assert(S(HVCAM_FMT_YUY2, 1280, 720, 30, 1, &hd) >
+    TEST_ASSERT(S(HVCAM_FMT_YUY2, 1280, 720, 30, 1, &hd) >
            S(HVCAM_FMT_MJPEG, 1280, 720, 15, 1, &hd));
 
     /* Default (no request): prefer the largest >=30fps mode —
      * 1080p MJPEG@30 over a VGA YUY2@30. */
-    assert(S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &none) >
+    TEST_ASSERT(S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &none) >
            S(HVCAM_FMT_YUY2, 640, 480, 30, 1, &none));
 
     /* Explicit --fps is user intent: --fps 5 picks the 5 fps type. */
-    assert(S(HVCAM_FMT_YUY2, 1920, 1080, 5, 1, &fhd_5) >
+    TEST_ASSERT(S(HVCAM_FMT_YUY2, 1920, 1080, 5, 1, &fhd_5) >
            S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &fhd_5));
-    assert(S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &fhd_30) >
+    TEST_ASSERT(S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &fhd_30) >
            S(HVCAM_FMT_YUY2, 1920, 1080, 5, 1, &fhd_30));
 
     /* prefer_format is a hard filter, not a preference: other
      * formats are eliminated even when they score far higher —
      * --format yuy2 must not silently hand back MJPEG just because
      * YUY2 exists only at VGA. */
-    assert(S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &fhd_yuy2) == INT32_MIN);
-    assert(S(HVCAM_FMT_NV12, 1920, 1080, 30, 1, &fhd_yuy2) == INT32_MIN);
+    TEST_ASSERT(S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &fhd_yuy2) == INT32_MIN);
+    TEST_ASSERT(S(HVCAM_FMT_NV12, 1920, 1080, 30, 1, &fhd_yuy2) == INT32_MIN);
     /* Survives the filter with a positive score: -250 in size
      * penalties is still outweighed by the 30 fps plateau. */
-    assert(S(HVCAM_FMT_YUY2, 640, 480, 30, 1, &fhd_yuy2) > 0);
-    assert(S(HVCAM_FMT_YUY2, 640, 480, 30, 1, &fhd_yuy2) >
+    TEST_ASSERT(S(HVCAM_FMT_YUY2, 640, 480, 30, 1, &fhd_yuy2) > 0);
+    TEST_ASSERT(S(HVCAM_FMT_YUY2, 640, 480, 30, 1, &fhd_yuy2) >
            S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &fhd_yuy2));
 
     /* Regression: the >=30fps plateau must outrank resolution and
      * format combined — a 30 fps VGA YUY2 beats a 15 fps 1080p
      * MJPEG in default negotiation (previously 95 < 102 picked the
      * slower large mode). */
-    assert(S(HVCAM_FMT_YUY2, 640, 480, 30, 1, &none) >
+    TEST_ASSERT(S(HVCAM_FMT_YUY2, 640, 480, 30, 1, &none) >
            S(HVCAM_FMT_MJPEG, 1920, 1080, 15, 1, &none));
 
     /* NTSC 29.97 rounds into the >=30 plateau, not under it. */
-    assert(S(HVCAM_FMT_MJPEG, 1920, 1080, 30000, 1001, &none) >
+    TEST_ASSERT(S(HVCAM_FMT_MJPEG, 1920, 1080, 30000, 1001, &none) >
            S(HVCAM_FMT_MJPEG, 1920, 1080, 15, 1, &none));
 
     /* Bigger beats smaller at equal fps when nothing is requested. */
-    assert(S(HVCAM_FMT_YUY2, 1920, 1080, 15, 1, &none) >
+    TEST_ASSERT(S(HVCAM_FMT_YUY2, 1920, 1080, 15, 1, &none) >
            S(HVCAM_FMT_YUY2, 1280, 720, 15, 1, &none));
 
     /* Unknown wire formats and a missing frame-rate attribute are
      * handled, not crashed on. */
-    assert(S(0, 1920, 1080, 30, 1, &none) == INT32_MIN);
+    TEST_ASSERT(S(0, 1920, 1080, 30, 1, &none) == INT32_MIN);
     (void)S(HVCAM_FMT_YUY2, 1920, 1080, 0, 0, &none);
 
     /* Fractional rates (NTSC 29.97) reach the >=30 plateau like 30. */
-    assert(S(HVCAM_FMT_MJPEG, 1920, 1080, 30000, 1001, &fhd) >
+    TEST_ASSERT(S(HVCAM_FMT_MJPEG, 1920, 1080, 30000, 1001, &fhd) >
            S(HVCAM_FMT_YUY2, 1920, 1080, 5, 1, &fhd));
 
     /* Negative request values are "unset", not a huge unsigned
      * request — a negative width must score exactly like none. */
     const HvScoreOpts neg = {-1, -1, -1, 0};
-    assert(S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &neg) ==
+    TEST_ASSERT(S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &neg) ==
            S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &none));
 
     /* Overflow guards: both intermediates compute in uint64_t.
      * UINT32_MAX/UINT32_MAX rounds to 1 fps — in uint32 the
      * numerator+half sum wraps and yields 0. */
-    assert(S(HVCAM_FMT_MJPEG, 640, 480, UINT32_MAX, UINT32_MAX, &none) ==
+    TEST_ASSERT(S(HVCAM_FMT_MJPEG, 640, 480, UINT32_MAX, UINT32_MAX, &none) ==
            S(HVCAM_FMT_MJPEG, 640, 480, 1, 1, &none));
     /* A numerator still past 2^32 after +half must reach the >=30
      * plateau — in uint32 the sum wraps to a 0 fps score. */
-    assert(S(HVCAM_FMT_MJPEG, 640, 480, UINT32_MAX, 2, &none) ==
+    TEST_ASSERT(S(HVCAM_FMT_MJPEG, 640, 480, UINT32_MAX, 2, &none) ==
            S(HVCAM_FMT_MJPEG, 640, 480, 30, 1, &none));
     /* 65536x65536 = 2^32 pixels wraps to 0 in uint32 — it must
      * saturate at the 1080p cap and count as "large", scoring
      * exactly like a real 1080p MJPEG@30. */
-    assert(S(HVCAM_FMT_MJPEG, 65536, 65536, 30, 1, &none) ==
+    TEST_ASSERT(S(HVCAM_FMT_MJPEG, 65536, 65536, 30, 1, &none) ==
            S(HVCAM_FMT_MJPEG, 1920, 1080, 30, 1, &none));
 
     printf("test_score: OK\n");

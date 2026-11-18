@@ -5,7 +5,11 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: true
 
 env:
   TAG: ${{ github.ref_name }}
@@ -14,40 +18,60 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Configure
         run: cmake -B build -A x64
       - name: Build
         run: cmake --build build --config Release
+      - name: Verify no CRT DLL dependency (/MT)
+        shell: pwsh
+        run: |
+          $exe = "build\Release\hvcam-host.exe"
+          if (-not (Test-Path $exe)) { throw "hvcam-host.exe not found" }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -find "VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          if (-not $dumpbin) { throw "dumpbin.exe not found via vswhere" }
+          $deps = & $dumpbin /dependents $exe
+          $deps | Out-String | Write-Host
+          if (($deps -join "`n") -match "(?i)VCRUNTIME.*\.dll|MSVCP.*\.dll") {
+            throw "hvcam-host.exe depends on CRT DLLs — expected static /MT"
+          }
       - name: Package
         shell: pwsh
         run: |
-          $tag = "$env:TAG"
-          $stage = "dist\hvcam-$tag-windows-x86_64"
+          $stage = "dist\hvcam-$env:TAG-windows-x86_64"
           New-Item -ItemType Directory -Force $stage | Out-Null
           Copy-Item "build\Release\hvcam-host.exe" $stage
           Copy-Item README.md, LICENSE $stage
-          Compress-Archive -Path "$stage\*" -DestinationPath "dist\hvcam-$tag-windows-x86_64.zip"
-      - uses: actions/upload-artifact@v4
+          # Zipping the dir itself (not $stage\*) keeps the root entry
+          # hvcam-$TAG-windows-x86_64/, symmetric with the Linux tarball.
+          Compress-Archive -Path $stage -DestinationPath "dist\hvcam-$env:TAG-windows-x86_64.zip"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: windows
-          path: dist/*.zip
+          name: hvcam-${{ env.TAG }}-windows-x86_64
+          path: dist/hvcam-${{ env.TAG }}-windows-x86_64.zip
 
   build-linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.x"
       - name: Install Python test deps
         run: python -m pip install numpy
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+        # See ci.yml: pin the setup-python interpreter so python_ring
+        # cannot silently skip on a numpy-less system python3.
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DPYTHON3_EXECUTABLE="$(which python)"
       - name: Build
         run: cmake --build build -j
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        # shell: bash turns on pipefail — see ci.yml.
+        shell: bash
+        run: ctest --test-dir build --output-on-failure | tee ctest.log
+      - name: python_ring must not skip
+        run: grep -E "python_ring.*\bPassed\b" ctest.log
       - name: Package
         run: |
           stage="dist/hvcam-$TAG-linux-x86_64"
@@ -58,23 +82,65 @@ jobs:
           cp README.md LICENSE "$stage/"
           tar -czf "dist/hvcam-$TAG-linux-x86_64.tar.gz" -C dist "hvcam-$TAG-linux-x86_64"
       - name: Smoke test extracted package
+        # shell: bash for pipefail on the ldd|tee below.
+        shell: bash
         run: |
           tmp=$(mktemp -d)
           tar -xzf "dist/hvcam-$TAG-linux-x86_64.tar.gz" -C "$tmp"
-          "$tmp/hvcam-$TAG-linux-x86_64/hvcam-dump" --help 2>&1 | grep -q "usage: hvcam-dump"
-      - uses: actions/upload-artifact@v4
+          pkg="$tmp/hvcam-$TAG-linux-x86_64"
+          # $ORIGIN rpath must resolve libhvcam.so next to the binary
+          # and nothing may be left unbound. `! cmd` is exempt from
+          # errexit, so an explicit if+exit is required to fail.
+          ldd "$pkg/hvcam-dump" | tee ldd.log
+          grep -q "libhvcam.so =>" ldd.log
+          if grep -q "not found" ldd.log; then
+            echo "unresolved libraries in extracted package"
+            exit 1
+          fi
+          # --help exits 2 by contract — capture the code itself instead
+          # of piping stdout, which would mask the exit status.
+          rc=0
+          "$pkg/hvcam-dump" --help > help.out 2>&1 || rc=$?
+          [ "$rc" -eq 2 ]
+          grep -q "usage: hvcam-dump" help.out
+          # The shipped ctypes binding must import against the packaged .so.
+          LD_LIBRARY_PATH="$pkg" PYTHONPATH="$pkg/python" python -c "import hvcam"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: linux
-          path: dist/*.tar.gz
+          name: hvcam-${{ env.TAG }}-linux-x86_64
+          path: dist/hvcam-${{ env.TAG }}-linux-x86_64.tar.gz
 
   release:
     needs: [build-windows, build-linux]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write      # create the GitHub release
+      id-token: write      # OIDC for provenance signing
+      attestations: write  # store attestations
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
+      - name: Guard — tag must be reachable from main
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor HEAD origin/main
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: hvcam-${{ env.TAG }}-windows-x86_64
           path: dist
-          merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: hvcam-${{ env.TAG }}-linux-x86_64
+          path: dist
+      - name: Checksum release assets
+        run: |
+          cd dist
+          sha256sum *.zip *.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
