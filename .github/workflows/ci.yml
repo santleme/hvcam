@@ -9,23 +9,28 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.x"
       - name: Install Python test deps
         run: python -m pip install numpy
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+        # PYTHON3_EXECUTABLE pins the setup-python interpreter (the one
+        # that just got numpy) — find_program would otherwise discover
+        # the system python3 and python_ring would skip on 77.
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DPYTHON3_EXECUTABLE="$(which python)"
       - name: Build
         run: cmake --build build -j
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure | tee ctest.log
+      - name: python_ring must not skip
+        run: grep -E "python_ring.*\bPassed\b" ctest.log
 
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Configure
         run: cmake -B build -A x64
       - name: Build
@@ -35,3 +40,14 @@ jobs:
           $exe = "build\Release\hvcam-host.exe"
           if (-not (Test-Path $exe)) { throw "hvcam-host.exe not found" }
           Get-Item $exe | Select-Object Name, Length
+      - name: Verify no CRT DLL dependency (/MT)
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -find "VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          if (-not $dumpbin) { throw "dumpbin.exe not found via vswhere" }
+          $deps = & $dumpbin /dependents "build\Release\hvcam-host.exe"
+          $deps | Out-String | Write-Host
+          if (($deps -join "`n") -match "(?i)VCRUNTIME.*\.dll|MSVCP.*\.dll") {
+            throw "hvcam-host.exe depends on CRT DLLs — expected static /MT"
+          }

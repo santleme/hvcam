@@ -51,11 +51,6 @@ else()
     add_executable(test_score tests/test_score.c)
     add_test(NAME score COMMAND test_score)
 
-    # Tests drive side effects through assert() (bind/listen/pthread_create).
-    # Release's -DNDEBUG would compile the bodies out — keep them live.
-    target_compile_options(test_loopback PRIVATE -UNDEBUG)
-    target_compile_options(test_score PRIVATE -UNDEBUG)
-
     find_program(PYTHON3_EXECUTABLE NAMES python3 python)
     if(PYTHON3_EXECUTABLE)
         add_test(NAME python_ring
