@@ -52,7 +52,12 @@ else()
         add_test(NAME python_ring
                  COMMAND ${PYTHON3_EXECUTABLE}
                          ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ring.py)
-        # exit 77 = numpy missing → skipped, not failed
-        set_tests_properties(python_ring PROPERTIES SKIP_RETURN_CODE 77)
+        # exit 77 = numpy missing → skipped, not failed.
+        # HVCAM_LIB pins the .so this build just produced, so the
+        # test works with any -B dir and can't pick up a stale
+        # default-build library.
+        set_tests_properties(python_ring PROPERTIES
+            SKIP_RETURN_CODE 77
+            ENVIRONMENT "HVCAM_LIB=$<TARGET_FILE:hvcam>")
     endif()
 endif()

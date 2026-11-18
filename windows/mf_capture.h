@@ -34,9 +34,11 @@ struct MfOpenOptions {
     int exposure = INT32_MIN;
     // VideoProcAmp_Gain, device units; INT32_MIN = leave at auto.
     int gain = INT32_MIN;
-    // Optional: force this exact subtype if the camera offers it.
+    // Optional hard filter: restrict negotiation to this subtype.
+    // If the camera offers no matching type, open() fails —
+    // --format never silently degrades into another format.
     // 0 = auto (highest delivered frame rate at the requested size;
-    // raw pixels break ties — see include/media_score.h).
+    // see include/media_score.h).
     uint32_t prefer_format = 0;
 };
 
