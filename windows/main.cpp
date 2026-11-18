@@ -78,6 +78,25 @@ int vsock_registry(uint32_t port, bool remove)
     return 0;
 }
 
+// Read-only probe, no admin needed: is the service GUID for this
+// port registered? Without it the Hyper-V kernel drops guest->host
+// SYNs silently and the client just times out — catch that at
+// startup instead of after a confusing wait.
+bool vsock_service_registered(uint32_t port)
+{
+    char key[256];
+    snprintf(key, sizeof(key),
+             "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\"
+             "Virtualization\\GuestCommunicationServices\\"
+             "{%08x-facb-11e6-bd58-64006a7986d3}",
+             (unsigned)port);
+    HKEY hk = nullptr;
+    LONG rc = RegOpenKeyExA(HKEY_LOCAL_MACHINE, key, 0, KEY_READ, &hk);
+    if (rc == ERROR_SUCCESS)
+        RegCloseKey(hk);
+    return rc == ERROR_SUCCESS;
+}
+
 } // namespace
 
 namespace {
@@ -133,7 +152,13 @@ void usage()
         "  --port N              vsock/tcp port (default 8765)\n"
         "  --width N --height N  requested resolution (default: camera native)\n"
         "  --fps N               requested frame rate\n"
+        "  --format FMT          force pixel format: yuy2|nv12|mjpeg|\n"
+        "                        bgr24|bgrx32 (default: highest delivered\n"
+        "                        fps at the requested size)\n"
         "  --tcp IP[:PORT]       TCP mode bound to IP (default: vsock)\n"
+        "  --reverse             connect out to the guest's vsock listener\n"
+        "                        instead of accepting guest->host (no\n"
+        "                        --register-vsock / admin needed)\n"
         "  --vm-guid GUID        accept vsock only from that VM\n"
         "  --no-auto-pin         keep the wildcard vsock bind; do not\n"
         "                        auto-pin to the running WSL VM\n"
@@ -154,6 +179,7 @@ int main(int argc, char **argv)
     GUID allowed_vm{};
     bool have_vm_guid = false;
     bool no_auto_pin = false;
+    bool do_reverse = false;
     bool do_list = false;
     bool do_register = false, do_unregister = false;
 
@@ -177,6 +203,19 @@ int main(int argc, char **argv)
             opts.height = (int)parse_long(need("--height"), "--height", 0, 16384);
         else if (a == "--fps")
             opts.fps = (int)parse_long(need("--fps"), "--fps", 0, 480);
+        else if (a == "--format") {
+            std::string f = need("--format");
+            if      (f == "yuy2")   opts.prefer_format = HVCAM_FMT_YUY2;
+            else if (f == "nv12")   opts.prefer_format = HVCAM_FMT_NV12;
+            else if (f == "mjpeg")  opts.prefer_format = HVCAM_FMT_MJPEG;
+            else if (f == "bgr24")  opts.prefer_format = HVCAM_FMT_BGR24;
+            else if (f == "bgrx32") opts.prefer_format = HVCAM_FMT_BGRX32;
+            else {
+                fprintf(stderr, "hvcam-host: invalid --format '%s' "
+                        "(yuy2|nv12|mjpeg|bgr24|bgrx32)\n", f.c_str());
+                return 2;
+            }
+        }
         else if (a == "--tcp") {
             // Accepts "IP" or "IP:port" — the suffix becomes `port`
             // and only the bare address reaches inet_pton (IPv4).
@@ -208,6 +247,7 @@ int main(int argc, char **argv)
         else if (a == "--lock-exposure") opts.lock_exposure = true;
         else if (a == "--lock-focus") opts.lock_focus = true;
         else if (a == "--no-auto-pin") no_auto_pin = true;
+        else if (a == "--reverse") do_reverse = true;
         else if (a == "--register-vsock") do_register = true;
         else if (a == "--unregister-vsock") do_unregister = true;
         else {
@@ -218,6 +258,15 @@ int main(int argc, char **argv)
 
     if (!tcp_ip.empty() && port > 65535) {
         fprintf(stderr, "hvcam-host: TCP port must be 1..65535\n");
+        return 2;
+    }
+    if (do_reverse && !tcp_ip.empty()) {
+        fprintf(stderr, "hvcam-host: --reverse is vsock-only\n");
+        return 2;
+    }
+    if (do_reverse && no_auto_pin && !have_vm_guid) {
+        fprintf(stderr, "hvcam-host: --reverse needs a target VM — "
+                "--no-auto-pin requires --vm-guid\n");
         return 2;
     }
 
@@ -249,11 +298,26 @@ int main(int argc, char **argv)
         cam.start(&slots);
         fprintf(stderr, "hvcam-host: capture active %dx%d fmt=%u\n",
                 cam.width(), cam.height(), cam.format());
-        int rc = tcp_ip.empty()
-                     ? run_server_vsock(&slots, port,
-                                        have_vm_guid ? &allowed_vm : nullptr,
-                                        !have_vm_guid && !no_auto_pin)
-                     : run_server_tcp(&slots, tcp_ip.c_str(), (uint16_t)port);
+        int rc;
+        if (!tcp_ip.empty()) {
+            rc = run_server_tcp(&slots, tcp_ip.c_str(), (uint16_t)port);
+        } else if (do_reverse) {
+            rc = run_client_vsock_reverse(
+                     &slots, port,
+                     have_vm_guid ? &allowed_vm : nullptr,
+                     !no_auto_pin);
+        } else {
+            if (!vsock_service_registered(port))
+                fprintf(stderr,
+                        "hvcam: warning — vsock service GUID not registered "
+                        "for port %u; guest->host connects will time out.\n"
+                        "  Run once as admin: hvcam-host --register-vsock "
+                        "--port %u — or use --tcp / --reverse (no admin).\n",
+                        (unsigned)port, (unsigned)port);
+            rc = run_server_vsock(&slots, port,
+                                  have_vm_guid ? &allowed_vm : nullptr,
+                                  !have_vm_guid && !no_auto_pin);
+        }
         cam.close();
         WSACleanup();
         return rc;

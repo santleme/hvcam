@@ -310,6 +310,67 @@ int run_server_vsock(FrameSlots *slots, uint32_t port,
     return vsock_accept_loop(&b, port, slots, auto_pin && !vm_guid);
 }
 
+int run_client_vsock_reverse(FrameSlots *slots, uint32_t port,
+                             const GUID *vm_guid, bool auto_detect)
+{
+    GUID target{};
+    bool have_target = false;
+    bool waited = false;
+    for (;;) {
+        // Resolve the destination every cycle: the WSL utility VM
+        // gets a fresh VmId on each boot, and in reverse mode a stale
+        // id is a connection to nowhere.
+        if (vm_guid) {
+            target = *vm_guid;
+            have_target = true;
+        } else if (auto_detect) {
+            have_target = detect_wsl_vmid(&target);
+        }
+        if (!have_target) {
+            fprintf(stderr, "hvcam: reverse mode — no WSL VM yet; "
+                    "retrying...\r");
+            Sleep(1000);
+            continue;
+        }
+        SOCKET c = socket(AF_HYPERV, SOCK_STREAM, HV_PROTOCOL_RAW);
+        if (c == INVALID_SOCKET) {
+            fprintf(stderr, "hvcam: AF_HYPERV socket failed (WSA %d)\n",
+                    WSAGetLastError());
+            Sleep(1000);
+            continue;
+        }
+        SOCKADDR_HV a{};
+        a.Family = AF_HYPERV;
+        a.VmId = target;
+        a.ServiceId = service_guid_for_port(port);
+        if (connect(c, (const sockaddr *)&a, sizeof(a)) == SOCKET_ERROR) {
+            // Guest not listening (or VM still booting): retry.
+            // The hint prints once per disconnect streak, not per
+            // attempt — a silent 1 Hz retry is indistinguishable
+            // from a hang.
+            if (!waited) {
+                waited = true;
+                fprintf(stderr, "hvcam: reverse mode — waiting for a "
+                        "guest listener on port %u (hvcam-dump --listen "
+                        "/ Camera(listen=True)) (WSA %d)\n",
+                        (unsigned)port, WSAGetLastError());
+            }
+            closesocket(c);
+            Sleep(1000);
+            continue;
+        }
+        waited = false;
+        char gstr[48];
+        guid_to_string(target, gstr, sizeof(gstr));
+        fprintf(stderr, "hvcam: connected to guest listener (vm=%s)\n",
+                gstr);
+        serve_client(c, slots);
+        closesocket(c);
+        fprintf(stderr, "hvcam: guest disconnected; reconnecting...\n");
+    }
+    return 0;
+}
+
 int run_server_tcp(FrameSlots *slots, const char *bind_ip, uint16_t port)
 {
     SOCKET l = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);

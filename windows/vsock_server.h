@@ -22,4 +22,14 @@ class FrameSlots;
 // the id changes on every WSL boot.
 int run_server_vsock(FrameSlots *slots, uint32_t port,
                      const GUID *vm_guid, bool auto_pin);
+
+// Reverse direction: the host connects OUT to a vsock listener in
+// the guest (libhvcam's hvcam_listen / `hvcam-dump --listen`).
+// Host->guest hvsock needs no GuestCommunicationServices key — the
+// zero-admin path. Loops forever: re-resolves the WSL VmId between
+// attempts, so it self-heals across guest restarts and WSL reboots.
+// vm_guid pins the target explicitly; auto_detect re-discovers WSL.
+int run_client_vsock_reverse(FrameSlots *slots, uint32_t port,
+                             const GUID *vm_guid, bool auto_detect);
+
 int run_server_tcp(FrameSlots *slots, const char *bind_ip, uint16_t port);
