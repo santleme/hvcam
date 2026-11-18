@@ -27,8 +27,9 @@ struct MfOpenOptions {
     int fps = 0;     // 0 = camera default
     bool lock_exposure = false;
     bool lock_focus = false;
-    // Optional: prefer this exact subtype if the camera offers it.
-    // 0 = auto (prefer uncompressed yuy2/nv12, then mjpeg).
+    // Optional: force this exact subtype if the camera offers it.
+    // 0 = auto (highest delivered frame rate at the requested size;
+    // raw pixels break ties — see include/media_score.h).
     uint32_t prefer_format = 0;
 };
 

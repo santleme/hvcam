@@ -30,6 +30,7 @@
 #include <string>
 
 #include "frame_slots.h"
+#include "media_score.h"
 #include "protocol.h"
 
 #pragma comment(lib, "mfplat.lib")
@@ -60,25 +61,19 @@ uint32_t subtype_to_fmt(const GUID &sub)
     return 0;
 }
 
-// Higher score = better. Exact size match dominates; uncompressed
-// formats beat MJPG only when the caller wants ready pixels.
+// Higher score = better. The policy lives in include/media_score.h
+// (pure, unit-tested on the Linux side): requested size dominates,
+// then delivered frame rate — on USB 2.0 that is what keeps a
+// 1080p stream off the ~5 fps uncompressed isochronous ceiling and
+// on the camera's 30 fps MJPEG mode — then resolution, then the
+// raw-pixel preference as a tie-break.
 int score_type(const GUID &sub, UINT32 w, UINT32 h, UINT32 fpsNum, UINT32 fpsDen,
                const MfOpenOptions &o)
 {
-    int score = 0;
-    if (o.width && w == (UINT32)o.width) score += 10000;
-    if (o.height && h == (UINT32)o.height) score += 10000;
-    if (o.width && w != (UINT32)o.width) score -= (int)(w > (UINT32)o.width ? 200 : 50);
-    if (o.height && h != (UINT32)o.height) score -= 200;
-    if (o.fps && fpsDen && (fpsNum / fpsDen) == (UINT32)o.fps) score += 1000;
     uint32_t f = subtype_to_fmt(sub);
     if (!f) return -1;
-    if (o.prefer_format && f == o.prefer_format) score += 500;
-    if (f == HVCAM_FMT_YUY2) score += 30;   // ready pixels, cheap USB
-    else if (f == HVCAM_FMT_NV12) score += 25;
-    else if (f == HVCAM_FMT_MJPEG) score += 20; // smallest payload
-    else if (f == HVCAM_FMT_BGR24) score += 10;
-    return score;
+    HvScoreOpts so{o.width, o.height, o.fps, o.prefer_format};
+    return (int)hvcam_media_score(f, w, h, fpsNum, fpsDen, &so);
 }
 
 // IMFSourceReaderCallback implementation — plain COM, no ATL.
