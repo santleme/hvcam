@@ -87,6 +87,15 @@ ctest --test-dir build
 > `--unregister-vsock` removes it. The `--tcp` path needs no registration —
 > and neither does `--reverse`, where the host connects out to the guest's
 > listener instead (see below).
+
+> **Why 30 fps needs `--exposure`.** UVC firmware runs low-light
+> compensation: indoors it stretches the shutter from 33 ms (1/30 s)
+> toward ~50 ms (1/20 s), so the camera physically emits ~20 fps even
+> when its descriptor advertises 30 — with motion blur on fast moves.
+> `--exposure -6` (1/64 s) pins the shutter under the 1/30 s budget and
+> the sensor delivers a real 30.8 fps (measured); add `--gain` to lift
+> the darker frame — a slightly dark, sharp frame beats a bright,
+> blurred one for inference.
 >
 > On shared hosts, combine `--register-vsock` with `--vm-guid <GUID>` so only the
 > intended guest can connect.
@@ -96,6 +105,7 @@ ctest --test-dir build
 hvcam-host --list                              # enumerate UVC cameras
 hvcam-host --device 0 --width 1280 --height 720 --lock-focus
 hvcam-host --format mjpeg                      # force a wire format (yuy2|nv12|mjpeg|bgr24|bgrx32)
+hvcam-host --exposure -6 --gain 40             # manual exposure (log2 s) + gain — real 30 fps
 hvcam-host --tcp 127.0.0.1:8765                # TCP fallback (IP[:port]); unencrypted
 hvcam-host --reverse                           # connect OUT to the guest listener — zero admin
 hvcam-host --vm-guid <guid>                    # accept only that guest (skips auto-pin)
@@ -130,6 +140,10 @@ bgr = cam.to_bgr(info, raw)  # optional cv2 conversion
 ```
 
 `grab()` needs `libhvcam.so` on `LD_LIBRARY_PATH` or next to `hvcam.py`.
+`to_bgr()` decodes MJPEG with PyTurboJPEG when importable (~2.5× faster
+than `cv2.imdecode`: 3.0 ms vs 7.8 ms at 1080p) and falls back to cv2
+otherwise; `HVCAM_TURBOJPEG=<path to libturbojpeg.so>` points at a
+non-system library, `HVCAM_FASTDCT=1` trades a little quality for speed.
 
 ## Repository layout
 
@@ -150,8 +164,10 @@ capture → triple-buffer → wire protocol → `libhvcam` → `hvcam-dump` — 
 frames over TCP and vsock. With fps-aware negotiation the host now picks
 `1920×1080 MJPEG @30` on a USB 2.0 camera (previously `YUY2 @~5 fps`); measured
 ~19–20 fps delivered over both transports vs 13.6 fps forced-NV12 — the delta to
-30 is sensor/exposure, not bus or protocol. `--reverse` + `hvcam-dump --listen`
-was verified end-to-end with no registry entry. Guest→host vsock still accepts
+30 was sensor exposure (low-light comp), not bus or protocol: with
+`--exposure -6` the same camera delivers ~30.8 real fps end-to-end. `--reverse` +
+`hvcam-dump --listen` and `Camera(listen=True)` were verified end-to-end with no
+registry entry. Guest→host vsock still accepts
 the one-time `--register-vsock` step; it is no longer required when `--reverse`
 is used, and its absence is now a loud startup warning instead of a silent
 client timeout.
