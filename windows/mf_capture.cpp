@@ -1,14 +1,11 @@
 // mf_capture.cpp — Media Foundation async capture.
 //
-// Windows-only (MSVC). Not yet exercised on hardware — the API path
-// is documented: MFEnumDeviceSources -> ActivateObject ->
-// MFCreateSourceReaderFromMediaSource(async) ->
+// Windows-only (MSVC). Hardware-validated path: MFEnumDeviceSources
+// -> ActivateObject -> MFCreateSourceReaderFromMediaSource(async) ->
 // GetNativeMediaType/SetCurrentMediaType -> ReadSample pump.
-//
-// NOTE ON HARDWARE VALIDATION: the first hardware run must confirm
-// (a) subtype GUIDs mapping, (b) IAMCameraControl/IAMVideoProcAmp QI
-// path on the target UVC driver — some drivers expose them, some
-// don't; failures degrade to warnings, never to capture loss.
+// IAMCameraControl/IAMVideoProcAmp QI works on standard UVC drivers;
+// drivers that don't expose them degrade to warnings, never to
+// capture loss.
 #include "mf_capture.h"
 
 #include <mfapi.h>
@@ -57,7 +54,7 @@ uint32_t subtype_to_fmt(const GUID &sub)
     if (sub == MFVideoFormat_NV12) return HVCAM_FMT_NV12;
     if (sub == MFVideoFormat_MJPG) return HVCAM_FMT_MJPEG;
     if (sub == MFVideoFormat_RGB24) return HVCAM_FMT_BGR24;
-    if (sub == MFVideoFormat_RGB32) return HVCAM_FMT_BGRX32; // 4B/px declarado
+    if (sub == MFVideoFormat_RGB32) return HVCAM_FMT_BGRX32; // declared 4 bytes/px
     return 0;
 }
 
@@ -67,13 +64,11 @@ uint32_t subtype_to_fmt(const GUID &sub)
 // 1080p stream off the ~5 fps uncompressed isochronous ceiling and
 // on the camera's 30 fps MJPEG mode — then resolution, then the
 // raw-pixel preference as a tie-break.
-int score_type(const GUID &sub, UINT32 w, UINT32 h, UINT32 fpsNum, UINT32 fpsDen,
-               const MfOpenOptions &o)
+int32_t score_type(uint32_t fmt, UINT32 w, UINT32 h, UINT32 fpsNum,
+                   UINT32 fpsDen, const MfOpenOptions &o)
 {
-    uint32_t f = subtype_to_fmt(sub);
-    if (!f) return -1;
     HvScoreOpts so{o.width, o.height, o.fps, o.prefer_format};
-    return (int)hvcam_media_score(f, w, h, fpsNum, fpsDen, &so);
+    return hvcam_media_score(fmt, w, h, fpsNum, fpsDen, &so);
 }
 
 // IMFSourceReaderCallback implementation — plain COM, no ATL.
@@ -157,8 +152,8 @@ public:
                             slot->h = (uint16_t)h_;
                             slot->format = fmt_;
                             slot->seq = seq_++;
-                            // Relogio unico: QPC na chegada, sempre.
-                            // Split div/mul evita overflow do *1e6 a 10MHz.
+                            // Single clock: QPC at arrival, always.
+                            // Split div/mul avoids overflow of *1e6 at 10MHz.
                             LARGE_INTEGER qpc;
                             QueryPerformanceCounter(&qpc);
                             uint64_t q = (uint64_t)qpc.QuadPart;
@@ -331,12 +326,13 @@ void MfCapture::open(const MfOpenOptions &opts)
     // The MF devsource on many UVC drivers QIs to the DirectShow-style
     // IAM interfaces. If the driver doesn't expose them we warn and go
     // on — capture is never blocked by a missing control.
-    if (opts.lock_exposure || opts.lock_focus ||
+    if (opts.lock_exposure || opts.lock_focus || opts.lock_gain ||
         opts.exposure != INT32_MIN || opts.gain != INT32_MIN) {
         IAMCameraControl *cc = nullptr;
         IAMVideoProcAmp *pa = nullptr;
-        HRESULT hr1 = p_->source->QueryInterface(IID_IAMCameraControl, (void **)&cc);
-        HRESULT hr2 = p_->source->QueryInterface(IID_IAMVideoProcAmp, (void **)&pa);
+        // QI failure just leaves the pointer null — checked below.
+        (void)p_->source->QueryInterface(IID_IAMCameraControl, (void **)&cc);
+        (void)p_->source->QueryInterface(IID_IAMVideoProcAmp, (void **)&pa);
         // Explicit values first: manual exposure under ~1/30 s is what
         // disables the firmware's low-light-comp frame-rate cap, so a
         // --lock-exposure afterwards pins the new value, not the old.
@@ -365,10 +361,21 @@ void MfCapture::open(const MfOpenOptions &opts)
             else
                 fprintf(stderr, "hvcam: lock-exposure unsupported by driver\n");
         }
+        // Deliberately under lock_exposure: on UVC drivers the ISP
+        // auto-brightness path is part of auto-exposure, so leaving it
+        // on auto lets the driver keep compensating after the sensor
+        // exposure is pinned. lock_gain covers the gain half.
         if (opts.lock_exposure && pa) {
             long v = 0, f = 0;
             if (SUCCEEDED(pa->Get(VideoProcAmp_Brightness, &v, &f)))
                 pa->Set(VideoProcAmp_Brightness, v, VideoProcAmp_Flags_Manual);
+        }
+        if (opts.lock_gain) {
+            long v = 0, f = 0;
+            if (pa && SUCCEEDED(pa->Get(VideoProcAmp_Gain, &v, &f)))
+                pa->Set(VideoProcAmp_Gain, v, VideoProcAmp_Flags_Manual);
+            else
+                fprintf(stderr, "hvcam: lock-gain unsupported by driver\n");
         }
         if (opts.lock_focus && cc) {
             long v = 0, f = 0;
@@ -398,7 +405,7 @@ void MfCapture::open(const MfOpenOptions &opts)
     // the initial best_score, so an impossible --format fails loudly
     // below instead of silently degrading into another format.
     IMFMediaType *best = nullptr;
-    int best_score = INT_MIN;
+    int32_t best_score = INT32_MIN;
     for (DWORD i = 0;; i++) {
         IMFMediaType *mt = nullptr;
         HRESULT hr = p_->reader->GetNativeMediaType(
@@ -407,8 +414,9 @@ void MfCapture::open(const MfOpenOptions &opts)
             break;
         GUID sub = GUID_NULL;
         UINT32 w = 0, h = 0, fn = 0, fd = 0;
+        uint32_t fmt = 0;
         if (FAILED(mt->GetGUID(MF_MT_SUBTYPE, &sub)) ||
-            !subtype_to_fmt(sub) ||
+            !(fmt = subtype_to_fmt(sub)) ||
             FAILED(MFGetAttributeSize(mt, MF_MT_FRAME_SIZE, &w, &h)) ||
             !w || !h) {
             // Malformed type (missing subtype/frame size): skip
@@ -418,15 +426,16 @@ void MfCapture::open(const MfOpenOptions &opts)
         }
         if (FAILED(MFGetAttributeRatio(mt, MF_MT_FRAME_RATE, &fn, &fd)))
             fn = fd = 0; // frame rate optional for scoring
-        int sc = score_type(sub, w, h, fn, fd, opts);
+        int32_t sc = score_type(fmt, w, h, fn, fd, opts);
         if (sc > best_score) {
             if (best) best->Release();
             best = mt;
             best_score = sc;
             p_->w = (int)w;
             p_->h = (int)h;
-            p_->fps = fd ? (int)(fn / fd) : 0;
-            p_->fmt = subtype_to_fmt(sub);
+            // Same rational rounding the scorer uses (29.97 -> 30).
+            p_->fps = fd ? (int)((fn + (uint64_t)fd / 2) / fd) : 0;
+            p_->fmt = fmt;
         } else {
             mt->Release();
         }
@@ -450,7 +459,7 @@ void MfCapture::start(FrameSlots *slots)
     check_hr(p_->reader->ReadSample(
                (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0,
                nullptr, nullptr, nullptr, nullptr),
-             "ReadSample (primeira chamada)");
+             "ReadSample (first call)");
     p_->started = true;
 }
 
