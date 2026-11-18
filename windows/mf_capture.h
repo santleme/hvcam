@@ -27,6 +27,13 @@ struct MfOpenOptions {
     int fps = 0;     // 0 = camera default
     bool lock_exposure = false;
     bool lock_focus = false;
+    // CameraControl_Exposure units are log2 seconds: -5 ≈ 1/32 s,
+    // -6 = 1/64 s. Below ~-5 the sensor can actually sustain 30 fps —
+    // auto-exposure stretches to 1/20 s indoors (low-light comp) and
+    // caps the stream near 20 fps. INT32_MIN = leave at auto.
+    int exposure = INT32_MIN;
+    // VideoProcAmp_Gain, device units; INT32_MIN = leave at auto.
+    int gain = INT32_MIN;
     // Optional: force this exact subtype if the camera offers it.
     // 0 = auto (highest delivered frame rate at the requested size;
     // raw pixels break ties — see include/media_score.h).

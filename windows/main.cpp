@@ -165,6 +165,10 @@ void usage()
         "  --register-vsock      one-time admin: register the vsock\n"
         "                        service GUID so guests can connect\n"
         "  --unregister-vsock    remove that registration\n"
+        "  --exposure N          manual exposure, log2 seconds (e.g.\n"
+        "                        -6 = 1/64s — under 1/30s keeps the real\n"
+        "                        30 fps; auto-exposure caps ~20 indoors)\n"
+        "  --gain N              manual gain, device units\n"
         "  --lock-exposure       pin current exposure (manual)\n"
         "  --lock-focus          pin current focus (manual)\n");
 }
@@ -244,6 +248,11 @@ int main(int argc, char **argv)
             }
             have_vm_guid = true;
         }
+        else if (a == "--exposure")
+            opts.exposure = (int)parse_long(need("--exposure"),
+                                          "--exposure", -32, 31);
+        else if (a == "--gain")
+            opts.gain = (int)parse_long(need("--gain"), "--gain", 0, 100000);
         else if (a == "--lock-exposure") opts.lock_exposure = true;
         else if (a == "--lock-focus") opts.lock_focus = true;
         else if (a == "--no-auto-pin") no_auto_pin = true;

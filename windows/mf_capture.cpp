@@ -327,15 +327,37 @@ void MfCapture::open(const MfOpenOptions &opts)
         acts[i]->Release();
     CoTaskMemFree(acts);
 
-    // --- Optional camera locks: exposure / focus --------------------
+    // --- Optional camera controls: exposure / gain / locks ----------
     // The MF devsource on many UVC drivers QIs to the DirectShow-style
     // IAM interfaces. If the driver doesn't expose them we warn and go
     // on — capture is never blocked by a missing control.
-    if (opts.lock_exposure || opts.lock_focus) {
+    if (opts.lock_exposure || opts.lock_focus ||
+        opts.exposure != INT32_MIN || opts.gain != INT32_MIN) {
         IAMCameraControl *cc = nullptr;
         IAMVideoProcAmp *pa = nullptr;
         HRESULT hr1 = p_->source->QueryInterface(IID_IAMCameraControl, (void **)&cc);
         HRESULT hr2 = p_->source->QueryInterface(IID_IAMVideoProcAmp, (void **)&pa);
+        // Explicit values first: manual exposure under ~1/30 s is what
+        // disables the firmware's low-light-comp frame-rate cap, so a
+        // --lock-exposure afterwards pins the new value, not the old.
+        if (opts.exposure != INT32_MIN) {
+            if (cc && SUCCEEDED(cc->Set(CameraControl_Exposure,
+                                        opts.exposure,
+                                        CameraControl_Flags_Manual)))
+                fprintf(stderr, "hvcam: exposure set to %ld (log2 s, manual)\n",
+                        (long)opts.exposure);
+            else
+                fprintf(stderr, "hvcam: exposure unsupported by driver\n");
+        }
+        if (opts.gain != INT32_MIN) {
+            if (pa && SUCCEEDED(pa->Set(VideoProcAmp_Gain,
+                                        opts.gain,
+                                        VideoProcAmp_Flags_Manual)))
+                fprintf(stderr, "hvcam: gain set to %ld (manual)\n",
+                        (long)opts.gain);
+            else
+                fprintf(stderr, "hvcam: gain unsupported by driver\n");
+        }
         if (opts.lock_exposure && cc) {
             long v = 0, f = 0;
             if (SUCCEEDED(cc->Get(CameraControl_Exposure, &v, &f)))
