@@ -30,6 +30,7 @@
 #include <string>
 
 #include "frame_slots.h"
+#include "media_score.h"
 #include "protocol.h"
 
 #pragma comment(lib, "mfplat.lib")
@@ -60,25 +61,19 @@ uint32_t subtype_to_fmt(const GUID &sub)
     return 0;
 }
 
-// Higher score = better. Exact size match dominates; uncompressed
-// formats beat MJPG only when the caller wants ready pixels.
+// Higher score = better. The policy lives in include/media_score.h
+// (pure, unit-tested on the Linux side): requested size dominates,
+// then delivered frame rate — on USB 2.0 that is what keeps a
+// 1080p stream off the ~5 fps uncompressed isochronous ceiling and
+// on the camera's 30 fps MJPEG mode — then resolution, then the
+// raw-pixel preference as a tie-break.
 int score_type(const GUID &sub, UINT32 w, UINT32 h, UINT32 fpsNum, UINT32 fpsDen,
                const MfOpenOptions &o)
 {
-    int score = 0;
-    if (o.width && w == (UINT32)o.width) score += 10000;
-    if (o.height && h == (UINT32)o.height) score += 10000;
-    if (o.width && w != (UINT32)o.width) score -= (int)(w > (UINT32)o.width ? 200 : 50);
-    if (o.height && h != (UINT32)o.height) score -= 200;
-    if (o.fps && fpsDen && (fpsNum / fpsDen) == (UINT32)o.fps) score += 1000;
     uint32_t f = subtype_to_fmt(sub);
     if (!f) return -1;
-    if (o.prefer_format && f == o.prefer_format) score += 500;
-    if (f == HVCAM_FMT_YUY2) score += 30;   // ready pixels, cheap USB
-    else if (f == HVCAM_FMT_NV12) score += 25;
-    else if (f == HVCAM_FMT_MJPEG) score += 20; // smallest payload
-    else if (f == HVCAM_FMT_BGR24) score += 10;
-    return score;
+    HvScoreOpts so{o.width, o.height, o.fps, o.prefer_format};
+    return (int)hvcam_media_score(f, w, h, fpsNum, fpsDen, &so);
 }
 
 // IMFSourceReaderCallback implementation — plain COM, no ATL.
@@ -332,15 +327,37 @@ void MfCapture::open(const MfOpenOptions &opts)
         acts[i]->Release();
     CoTaskMemFree(acts);
 
-    // --- Optional camera locks: exposure / focus --------------------
+    // --- Optional camera controls: exposure / gain / locks ----------
     // The MF devsource on many UVC drivers QIs to the DirectShow-style
     // IAM interfaces. If the driver doesn't expose them we warn and go
     // on — capture is never blocked by a missing control.
-    if (opts.lock_exposure || opts.lock_focus) {
+    if (opts.lock_exposure || opts.lock_focus ||
+        opts.exposure != INT32_MIN || opts.gain != INT32_MIN) {
         IAMCameraControl *cc = nullptr;
         IAMVideoProcAmp *pa = nullptr;
         HRESULT hr1 = p_->source->QueryInterface(IID_IAMCameraControl, (void **)&cc);
         HRESULT hr2 = p_->source->QueryInterface(IID_IAMVideoProcAmp, (void **)&pa);
+        // Explicit values first: manual exposure under ~1/30 s is what
+        // disables the firmware's low-light-comp frame-rate cap, so a
+        // --lock-exposure afterwards pins the new value, not the old.
+        if (opts.exposure != INT32_MIN) {
+            if (cc && SUCCEEDED(cc->Set(CameraControl_Exposure,
+                                        opts.exposure,
+                                        CameraControl_Flags_Manual)))
+                fprintf(stderr, "hvcam: exposure set to %ld (log2 s, manual)\n",
+                        (long)opts.exposure);
+            else
+                fprintf(stderr, "hvcam: exposure unsupported by driver\n");
+        }
+        if (opts.gain != INT32_MIN) {
+            if (pa && SUCCEEDED(pa->Set(VideoProcAmp_Gain,
+                                        opts.gain,
+                                        VideoProcAmp_Flags_Manual)))
+                fprintf(stderr, "hvcam: gain set to %ld (manual)\n",
+                        (long)opts.gain);
+            else
+                fprintf(stderr, "hvcam: gain unsupported by driver\n");
+        }
         if (opts.lock_exposure && cc) {
             long v = 0, f = 0;
             if (SUCCEEDED(cc->Get(CameraControl_Exposure, &v, &f)))
@@ -377,9 +394,9 @@ void MfCapture::open(const MfOpenOptions &opts)
     ra->Release();
 
     // --- Negotiate ONCE: pick best native type ----------------------
-    // Unsupported subtypes leave BEFORE scoring; the first
-    // supported type is already a candidate, so any poor score still
-    // yields a usable fallback instead of rejecting the camera.
+    // Types filtered out by --format score INT32_MIN and never beat
+    // the initial best_score, so an impossible --format fails loudly
+    // below instead of silently degrading into another format.
     IMFMediaType *best = nullptr;
     int best_score = INT_MIN;
     for (DWORD i = 0;; i++) {
@@ -415,7 +432,9 @@ void MfCapture::open(const MfOpenOptions &opts)
         }
     }
     if (!best)
-        throw std::runtime_error("camera has no usable native type");
+        throw std::runtime_error(opts.prefer_format
+            ? "camera has no native type matching --format"
+            : "camera has no usable native type");
     check_hr(p_->reader->SetCurrentMediaType(
                (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, best),
              "SetCurrentMediaType");

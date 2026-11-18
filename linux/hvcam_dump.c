@@ -60,6 +60,7 @@ int main(int argc, char **argv)
     const char *tcp = NULL;
     uint32_t port = 8765;
     int max_frames = 0;
+    int use_listen = 0;
     double max_seconds = 5.0;
 
     for (int i = 1; i < argc; i++) {
@@ -74,8 +75,12 @@ int main(int argc, char **argv)
             max_frames = (int)parse_long(argv[++i], "-n", 0, INT_MAX);
         } else if (!strcmp(argv[i], "-t") && i + 1 < argc) {
             max_seconds = parse_seconds(argv[++i]);
+        } else if (!strcmp(argv[i], "--listen")) {
+            /* Reverse mode: wait for `hvcam-host --reverse` to
+             * connect in. No host-side registration needed. */
+            use_listen = 1;
         } else {
-            fprintf(stderr, "usage: hvcam-dump [--tcp host[:port]] [-p port] [-n frames] [-t seconds]\n");
+            fprintf(stderr, "usage: hvcam-dump [--tcp host[:port]] [--listen] [-p port] [-n frames] [-t seconds]\n");
             return 2;
         }
     }
@@ -104,6 +109,8 @@ int main(int argc, char **argv)
             return 2;
         }
         fd = hvcam_connect_tcp(tcp, (uint16_t)port);
+    } else if (use_listen) {
+        fd = hvcam_listen(port);
     } else {
         fd = hvcam_connect(port);
     }
