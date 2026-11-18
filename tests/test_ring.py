@@ -6,8 +6,11 @@ TCP loopback and checks payload survival across grabs.
 
 Exit 77 = skipped (numpy missing), so ctest can mark it skipped.
 """
+import importlib.util
+import os
 import socket
 import struct
+import subprocess
 import sys
 import threading
 
@@ -78,20 +81,40 @@ def main():
 
     # Corrupt MJPEG must surface as ValueError on BOTH decode paths —
     # PyTurboJPEG raises OSError internally and must be translated.
-    bad = bytes([0xFF]) * 64
-    try:
-        cam.to_bgr({"width": W, "height": H, "format": 4, "flags": 1},
-                   np.frombuffer(bad, dtype=np.uint8))
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("corrupt MJPEG did not raise ValueError")
+    # to_bgr() needs cv2 for every format (flip/cvtColor), so decoder
+    # coverage is gated on the optional dependency rather than
+    # failing the ring test when only numpy is installed.
+    if importlib.util.find_spec("cv2") is not None:
+        bad = bytes([0xFF]) * 64
+        try:
+            cam.to_bgr({"width": W, "height": H, "format": 4, "flags": 1},
+                       np.frombuffer(bad, dtype=np.uint8))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("corrupt MJPEG did not raise ValueError")
 
     cam.close()
     lsock.close()
     t.join(5)
+
+
+def check_hvcam_lib_pin():
+    # HVCAM_LIB is an authoritative pin: pointing it at a missing
+    # library must fail the import even though a valid libhvcam.so
+    # sits beside the binding — a silent fallback would let CI test
+    # a stale build while believing it tested the requested one.
+    env = dict(os.environ)
+    env["HVCAM_LIB"] = "/nonexistent/dir/libhvcam.so"
+    env["PYTHONPATH"] = os.path.dirname(hvcam.__file__)
+    r = subprocess.run([sys.executable, "-c", "import hvcam"],
+                       env=env, capture_output=True)
+    assert r.returncode != 0, \
+        "bad HVCAM_LIB pin silently fell back to the default search"
+
     print("test_ring: OK")
 
 
 if __name__ == "__main__":
     main()
+    check_hvcam_lib_pin()
